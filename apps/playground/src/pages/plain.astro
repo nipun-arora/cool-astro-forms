@@ -1,0 +1,100 @@
+---
+// Deliberately NO <ClientRouter /> here — proves capture.ts binds purely
+// off its module-load init() path (astro:page-load never fires without
+// ClientRouter), matching a typical production-host shape.
+---
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cool-astro-forms playground — plain</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+      label { display: block; margin-top: 1rem; font-weight: 600; }
+      input, textarea { width: 100%; padding: 0.5rem; font: inherit; box-sizing: border-box; }
+      button { margin-top: 1.5rem; padding: 0.6rem 1.2rem; font: inherit; cursor: pointer; }
+      #caf-submit-status { margin-top: 1rem; font-weight: 600; }
+      .caf-honeypot { position: absolute; left: -9999px; top: -9999px; opacity: 0; height: 0; overflow: hidden; }
+      nav a { margin-right: 1rem; }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/two">Page two</a>
+      <a href="/plain">Plain (no ClientRouter)</a>
+    </nav>
+    <h1>Plain page (no ClientRouter)</h1>
+    <p>Same <code>data-caf="demo"</code> form as the homepage, no View Transitions.</p>
+
+    <form data-caf="demo" method="post" action="/api/upload">
+      <label for="name">Name</label>
+      <input type="text" id="name" name="name" autocomplete="name" />
+
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" autocomplete="email" />
+
+      <label for="phone">Phone</label>
+      <input type="tel" id="phone" name="phone" autocomplete="tel" />
+
+      <label for="details">Details</label>
+      <textarea id="details" name="details" rows="4"></textarea>
+
+      <label>
+        <input type="checkbox" name="confirmed" value="yes" />
+        I confirm these details are accurate
+      </label>
+
+      <div class="caf-honeypot" aria-hidden="true">
+        <label for="_caf_hp">Leave this field empty</label>
+        <input type="text" id="_caf_hp" name="_caf_hp" tabindex="-1" autocomplete="off" />
+      </div>
+
+      <button type="submit">Submit</button>
+    </form>
+
+    <p id="caf-submit-status"></p>
+
+    <script>
+      // Same playground-only AJAX submit wiring as index.astro (kept
+      // self-contained per page rather than extracted into a shared
+      // component, per CONTEXT.md's "playground styling" discretion).
+      function initUploadForm(): void {
+        const form = document.querySelector<HTMLFormElement>('form[data-caf="demo"]');
+        if (!form) return;
+        if (form.dataset.cafUploadBound === 'true') return;
+        form.dataset.cafUploadBound = 'true';
+
+        form.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          const status = document.getElementById('caf-submit-status');
+
+          const formData = new FormData(form);
+          const fields: Record<string, string> = {};
+          for (const [key, value] of formData.entries()) {
+            if (typeof value === 'string') fields[key] = value;
+          }
+
+          try {
+            const res = await fetch('/api/upload', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ fields }),
+            });
+            if (res.ok) {
+              window.caf?.submitted('demo');
+              form.reset();
+              if (status) status.textContent = 'Submitted — thank you.';
+            } else if (status) {
+              status.textContent = 'Submit failed — please try again.';
+            }
+          } catch {
+            if (status) status.textContent = 'Submit failed — network error.';
+          }
+        });
+      }
+
+      initUploadForm();
+    </script>
+  </body>
+</html>

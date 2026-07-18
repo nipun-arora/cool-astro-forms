@@ -1,0 +1,23 @@
+AGENTS.md
+
+# dependencies
+node_modules/
+
+# build output
+dist/
+.astro/
+
+# runtime data (SQLite must never enter version control)
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# test artifacts
+coverage/
+test-results/
+playwright-report/
+
+# env / secrets
+.env
+.env.*

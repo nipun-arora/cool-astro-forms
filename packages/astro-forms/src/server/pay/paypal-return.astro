@@ -1,0 +1,95 @@
+---
+/**
+ * GET /forms-pay/paypal-return (PAY-05) — the PayPal Order's approval
+ * `return_url` landing page, same holding-state posture as success.astro.
+ *
+ * T-03-22 (spoofing / fake fulfillment): landing here proves the visitor
+ * approved the order in PayPal's UI, NOT that the capture succeeded — this
+ * page MUST NEVER flip `payments.status` to `'paid'` or write ANYTHING to
+ * storage. The inbound PayPal webhook (`PAYMENT.CAPTURE.COMPLETED`, 03-07)
+ * remains the sole source of truth. `token`/`PayerID` (PayPal's own
+ * return-URL query params) are read for DISPLAY ONLY, never looked up or
+ * acted on. Renders its own minimal shell — not `renderAdminPageHtml`
+ * (public, unauthenticated page).
+ *
+ * A3 (03-RESEARCH.md): PayPal approval links expire a few hours after
+ * order creation — documented in on-page copy so a visitor who bookmarks
+ * or revisits a stale link understands why it may no longer work.
+ */
+export const prerender = false;
+
+// Display-only — never used to query storage or flip any state (see docstring).
+const token = Astro.url.searchParams.get('token');
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Confirming your payment…</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: system-ui, sans-serif;
+        background: #f5f5f5;
+        color: #1a1a1a;
+        text-align: center;
+      }
+      main {
+        max-width: 26rem;
+        margin: 1.5rem;
+        padding: 2rem;
+        background: #fff;
+        border-radius: 0.5rem;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+      }
+      h1 {
+        margin: 0 0 0.75rem;
+        font-size: 1.25rem;
+      }
+      p {
+        margin: 0 0 0.5rem;
+        color: #444;
+        font-size: 0.95rem;
+      }
+      .caveat {
+        font-size: 0.82rem;
+        color: #666;
+      }
+      .session {
+        font-family: ui-monospace, monospace;
+        font-size: 0.8rem;
+        color: #888;
+        word-break: break-all;
+      }
+      a {
+        color: #2563eb;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Confirming your payment…</h1>
+      <p>
+        Thanks — we're finalizing your PayPal payment now. This can take a few moments; you don't need to do
+        anything else on this page.
+      </p>
+      <p>You'll receive a receipt from PayPal by email once the capture completes.</p>
+      <p class="caveat">
+        Note: PayPal approval links expire a few hours after they're created. If you're seeing this page from an
+        old link and something looks wrong, ask for a fresh payment link rather than retrying this one.
+      </p>
+      {token && <p class="session">Reference: {token}</p>}
+      <p><a href="/">&larr; Return home</a></p>
+    </main>
+  </body>
+</html>

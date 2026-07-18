@@ -1,0 +1,221 @@
+{
+  "name": "cool-astro-forms",
+  "version": "0.1.1",
+  "type": "module",
+  "license": "MIT",
+  "description": "Drop-in form-abandonment capture, user-journey tracking, payments, and file storage for Astro server-output sites.",
+  "keywords": [
+    "astro-integration",
+    "astro",
+    "astro-component",
+    "forms",
+    "form-abandonment",
+    "lead-recovery",
+    "lead-capture",
+    "gdpr",
+    "sqlite",
+    "turso",
+    "serverless"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nipun-arora/cool-astro-forms.git"
+  },
+  "homepage": "https://github.com/nipun-arora/cool-astro-forms#readme",
+  "bugs": {
+    "url": "https://github.com/nipun-arora/cool-astro-forms/issues"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "bin": {
+    "cool-astro-forms": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.d.ts",
+    "!dist/server/storage/adapter.contract.d.ts",
+    "src/config.ts",
+    "src/limits.ts",
+    "src/types.ts",
+    "src/virtual.d.ts",
+    "src/server",
+    "!src/server/**/*.test.ts",
+    "!src/server/storage/adapter.contract.ts",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/integration.d.ts",
+      "import": "./dist/integration.js",
+      "default": "./dist/integration.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js",
+      "default": "./dist/server/index.js"
+    },
+    "./server/routes/abandon.js": {
+      "types": "./dist/server/routes/abandon.d.ts",
+      "import": "./dist/server/routes/abandon.js",
+      "default": "./dist/server/routes/abandon.js"
+    },
+    "./server/routes/canary.js": {
+      "types": "./dist/server/routes/canary.d.ts",
+      "import": "./dist/server/routes/canary.js",
+      "default": "./dist/server/routes/canary.js"
+    },
+    "./server/routes/form-started.js": {
+      "types": "./dist/server/routes/form-started.d.ts",
+      "import": "./dist/server/routes/form-started.js",
+      "default": "./dist/server/routes/form-started.js"
+    },
+    "./server/routes/admin/auth.js": {
+      "types": "./dist/server/routes/admin/auth.d.ts",
+      "import": "./dist/server/routes/admin/auth.js",
+      "default": "./dist/server/routes/admin/auth.js"
+    },
+    "./server/routes/admin/entry-action.js": {
+      "types": "./dist/server/routes/admin/entry-action.d.ts",
+      "import": "./dist/server/routes/admin/entry-action.js",
+      "default": "./dist/server/routes/admin/entry-action.js"
+    },
+    "./server/routes/admin/export-csv.js": {
+      "types": "./dist/server/routes/admin/export-csv.d.ts",
+      "import": "./dist/server/routes/admin/export-csv.js",
+      "default": "./dist/server/routes/admin/export-csv.js"
+    },
+    "./server/routes/admin/export-db.js": {
+      "types": "./dist/server/routes/admin/export-db.d.ts",
+      "import": "./dist/server/routes/admin/export-db.js",
+      "default": "./dist/server/routes/admin/export-db.js"
+    },
+    "./server/routes/admin/payment-action.js": {
+      "types": "./dist/server/routes/admin/payment-action.d.ts",
+      "import": "./dist/server/routes/admin/payment-action.js",
+      "default": "./dist/server/routes/admin/payment-action.js"
+    },
+    "./server/routes/webhooks/stripe.js": {
+      "types": "./dist/server/routes/webhooks/stripe.d.ts",
+      "import": "./dist/server/routes/webhooks/stripe.js",
+      "default": "./dist/server/routes/webhooks/stripe.js"
+    },
+    "./server/routes/webhooks/paypal.js": {
+      "types": "./dist/server/routes/webhooks/paypal.d.ts",
+      "import": "./dist/server/routes/webhooks/paypal.js",
+      "default": "./dist/server/routes/webhooks/paypal.js"
+    },
+    "./server/routes/recovery-unsubscribe.js": {
+      "types": "./dist/server/routes/recovery-unsubscribe.d.ts",
+      "import": "./dist/server/routes/recovery-unsubscribe.js",
+      "default": "./dist/server/routes/recovery-unsubscribe.js"
+    },
+    "./server/routes/pay/create-session.js": {
+      "types": "./dist/server/routes/pay/create-session.d.ts",
+      "import": "./dist/server/routes/pay/create-session.js",
+      "default": "./dist/server/routes/pay/create-session.js"
+    },
+    "./server/admin/_shared.js": {
+      "types": "./dist/server/admin/_shared.d.ts",
+      "import": "./dist/server/admin/_shared.js",
+      "default": "./dist/server/admin/_shared.js"
+    },
+    "./server/admin/login.astro": {
+      "default": "./src/server/admin/login.astro"
+    },
+    "./server/admin/entries.astro": {
+      "default": "./src/server/admin/entries.astro"
+    },
+    "./server/admin/abandoned.astro": {
+      "default": "./src/server/admin/abandoned.astro"
+    },
+    "./server/admin/payments.astro": {
+      "default": "./src/server/admin/payments.astro"
+    },
+    "./server/admin/analytics.astro": {
+      "default": "./src/server/admin/analytics.astro"
+    },
+    "./server/admin/entry-detail.astro": {
+      "default": "./src/server/admin/entry-detail.astro"
+    },
+    "./server/pay/pay.astro": {
+      "default": "./src/server/pay/pay.astro"
+    },
+    "./server/pay/success.astro": {
+      "default": "./src/server/pay/success.astro"
+    },
+    "./server/pay/paypal-return.astro": {
+      "default": "./src/server/pay/paypal-return.astro"
+    },
+    "./server/middleware.js": {
+      "types": "./dist/server/middleware.d.ts",
+      "import": "./dist/server/middleware.js",
+      "default": "./dist/server/middleware.js"
+    },
+    "./server/storage/turso.js": {
+      "types": "./dist/server/storage/turso.d.ts",
+      "import": "./dist/server/storage/turso.js",
+      "default": "./dist/server/storage/turso.js"
+    },
+    "./server/test-hooks.js": {
+      "types": "./dist/server/test-hooks.d.ts",
+      "import": "./dist/server/test-hooks.js",
+      "default": "./dist/server/test-hooks.js"
+    },
+    "./client/capture.js": {
+      "types": "./dist/client/capture.d.ts",
+      "import": "./dist/client/capture.js",
+      "default": "./dist/client/capture.js"
+    },
+    "./client/journey.js": {
+      "types": "./dist/client/journey.d.ts",
+      "import": "./dist/client/journey.js",
+      "default": "./dist/client/journey.js"
+    },
+    "./client/turnstile-loader.js": {
+      "types": "./dist/client/turnstile-loader.d.ts",
+      "import": "./dist/client/turnstile-loader.js",
+      "default": "./dist/client/turnstile-loader.js"
+    },
+    "./client/recovery-widget.js": {
+      "types": "./dist/client/recovery-widget.d.ts",
+      "import": "./dist/client/recovery-widget.js",
+      "default": "./dist/client/recovery-widget.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup && tsc --emitDeclarationOnly --declaration",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepack": "cp ../../LICENSE ./LICENSE && cp ../../NOTICE ./NOTICE"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "nodemailer": "^9.0.3",
+    "stripe": "^22.3.2",
+    "ulid": "^3.0.2",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@libsql/client": "^0.17.0",
+    "astro": "^6.0.0 || ^7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@libsql/client": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@libsql/client": "^0.17.4",
+    "@playwright/test": "^1.61.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^26.1.1",
+    "@types/nodemailer": "^8.0.1",
+    "jsdom": "^29.1.1",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.0",
+    "vitest": "^4.1.10"
+  }
+}

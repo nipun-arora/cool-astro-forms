@@ -1,0 +1,95 @@
+---
+/**
+ * GET /forms-admin/abandoned (ADMN-02) — the abandoned-leads view. Pins
+ * status='abandoned' regardless of any status query param, and adds two
+ * indicator columns beyond the default set:
+ *   - "Converted?" — has this visitor since submitted/converted the SAME
+ *     form (a later sibling row)? One lookup per row (admin-page scale, not
+ *     a hot path) since EntryFilter has no IN-array/OR-status query shape.
+ *   - "Bot check" — fields._turnstile === 'failed' (D3/B2), a FIXED label
+ *     on strict equality, never the raw field value (T-02-21).
+ * Route injection consolidated in P05 Task 3 (integration.ts).
+ */
+import config from 'virtual:cool-astro-forms/config';
+import type { Entry } from '../../types.js';
+import { logError } from '../log.js';
+import { getDb } from '../storage/db.js';
+import { SqliteStorage } from '../storage/sqlite.js';
+import {
+  DEFAULT_ENTRY_COLUMNS,
+  parseEntryFilter,
+  renderAdminPageHtml,
+  renderEntryTableHtml,
+  type EntryTableColumn,
+} from './_shared.js';
+
+export const prerender = false;
+
+type ConfigWithTrailingSlash = typeof config & { trailingSlash?: 'always' | 'never' | 'ignore' };
+const trailingSlash = (config as ConfigWithTrailingSlash).trailingSlash;
+
+const filter = parseEntryFilter(Astro.url.searchParams);
+// D4/D3: this view is always scoped to abandoned rows, regardless of any
+// status query param a visitor might tack on.
+filter.status = 'abandoned';
+
+let entries: Entry[] | undefined;
+let total = 0;
+let error = false;
+const convertedByEntryId = new Map<string, boolean>();
+
+try {
+  const storage = new SqliteStorage(getDb(config.dbPath));
+  const [fetchedEntries, fetchedTotal] = await Promise.all([
+    storage.listEntries(filter),
+    storage.countEntries(filter),
+  ]);
+  entries = fetchedEntries;
+  total = fetchedTotal;
+
+  for (const entry of entries) {
+    const siblings = await storage.listEntries({
+      siteId: entry.siteId,
+      formId: entry.formId,
+      visitorUuid: entry.visitorUuid,
+    });
+    const converted = siblings.some(
+      (sib) => (sib.status === 'submitted' || sib.status === 'converted') && sib.updatedAt >= entry.updatedAt,
+    );
+    convertedByEntryId.set(entry.id, converted);
+  }
+} catch (err) {
+  logError('admin.abandoned-query-failed', err);
+  error = true;
+  Astro.response.status = 500;
+}
+
+const extraColumns: EntryTableColumn[] = [
+  {
+    header: 'Converted?',
+    cell: (entry) => (convertedByEntryId.get(entry.id) ? 'Yes' : 'No'),
+  },
+  {
+    header: 'Bot check',
+    cell: (entry) =>
+      entry.fields._turnstile === 'failed' ? '<span class="flag-turnstile">bot-check failed</span>' : '',
+  },
+];
+
+const bodyHtml =
+  '<h1>Abandoned</h1>' +
+  renderEntryTableHtml({
+    entries,
+    total,
+    filter,
+    trailingSlash,
+    basePath: '/forms-admin/abandoned',
+    columns: [...DEFAULT_ENTRY_COLUMNS, ...extraColumns],
+    showStatusFilter: false,
+    error,
+  });
+
+const pageHtml = renderAdminPageHtml({ title: 'Abandoned — Admin', active: 'abandoned', trailingSlash, bodyHtml });
+---
+
+<Fragment set:html={pageHtml} />

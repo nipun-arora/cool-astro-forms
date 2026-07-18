@@ -1,0 +1,232 @@
+---
+/**
+ * GET /forms-admin/entries/[id] (ADMN-02) — the entry-detail view: fields,
+ * geo, journey timeline (JRNY-03), the turnstile-failed flag (D3/B2),
+ * payments (PAY-01/02), status controls, hard delete, and purgeVisitor.
+ * Reuses templates.ts's escapeHtml/renderFieldsHtml/renderJourneyTimelineHtml/
+ * renderGeoLine/formatMoney (P02/W3, T-01-36) — never re-implements them;
+ * renderGeoLine's own City/Region/Country line is supplemented (not
+ * replaced) with lat/lon/postal/isp, fields renderGeoLine itself doesn't
+ * cover. Route injection consolidated in P05 Task 3 (integration.ts).
+ */
+import config from 'virtual:cool-astro-forms/config';
+import type { Entry, EntryStatus, FileRecord, Geo, Payment } from '../../types.js';
+import { logError } from '../log.js';
+import { paypalConfigured } from '../payments/paypal.js';
+import { getDb } from '../storage/db.js';
+import { SqliteStorage } from '../storage/sqlite.js';
+import { escapeHtml, formatMoney, renderFieldsHtml, renderGeoLine, renderJourneyTimelineHtml } from '../templates.js';
+import { adminUrl, renderAdminPageHtml } from './_shared.js';
+
+export const prerender = false;
+
+type ConfigWithTrailingSlash = typeof config & { trailingSlash?: 'always' | 'never' | 'ignore' };
+const trailingSlash = (config as ConfigWithTrailingSlash).trailingSlash;
+
+const id = Astro.params.id ?? '';
+
+let entry: Entry | undefined;
+let payments: Payment[] = [];
+let files: FileRecord[] = [];
+let error = false;
+
+try {
+  const storage = new SqliteStorage(getDb(config.dbPath));
+  entry = await storage.getEntryById(id);
+  if (entry) {
+    payments = await storage.getPaymentsByEntry(id);
+    files = await storage.getFilesByEntry(id);
+  }
+} catch (err) {
+  logError('admin.entry-detail-query-failed', err, { id });
+  error = true;
+}
+
+const ENTRY_STATUSES: readonly EntryStatus[] = ['abandoned', 'submitted', 'converted', 'spam'];
+const actionUrl = adminUrl('/forms-admin/entries/action', trailingSlash);
+const entriesUrl = adminUrl('/forms-admin/entries', trailingSlash);
+const paymentActionUrl = adminUrl('/forms-admin/payments/action', trailingSlash);
+
+/** PAY-04 — the "Create payment link" form only ever renders when a provider is actually usable server-side; STRIPE_SECRET_KEY is read directly (never surfaced to the client) alongside the PayPal PAY-04 gate. */
+const providerConfigured = Boolean(process.env.STRIPE_SECRET_KEY) || paypalConfigured();
+
+/** One row per payment: status/amount/provider/created + a native copy-to-clipboard control (readonly input + a tiny inline button — zero client framework, matching this page's checkbox-confirm precedent). */
+function renderPaymentRowHtml(payment: Payment): string {
+  const amount = payment.amountCents !== undefined ? formatMoney(payment.amountCents, payment.currency ?? 'usd') : 'n/a';
+  const status = escapeHtml(payment.status ?? 'pending');
+  const provider = escapeHtml(payment.provider ?? 'n/a');
+  const created = escapeHtml(new Date(payment.createdAt).toISOString());
+  const copyControl = payment.payLinkUrl
+    ? `<input type="text" readonly value="${escapeHtml(payment.payLinkUrl)}" onfocus="this.select()" style="width:20rem;max-width:100%;" /> <button type="button" onclick="navigator.clipboard.writeText(this.previousElementSibling.value)">Copy link</button>`
+    : '(no link yet)';
+  return `<li><strong>${status}</strong> — ${amount} via ${provider} — ${created}<br />${copyControl}</li>`;
+}
+
+/** Renders the Payments section body: existing payment rows (EMPTY state when none) + the "Create payment link" form, gated on providerConfigured (PAY-04). */
+function renderPaymentsSectionHtml(entryPayments: Payment[]): string {
+  const list =
+    entryPayments.length === 0
+      ? '<p class="state-empty">No payments yet.</p>'
+      : `<ul>${entryPayments.map(renderPaymentRowHtml).join('')}</ul>`;
+
+  const createForm = providerConfigured
+    ? `<form method="post" action="${escapeHtml(paymentActionUrl)}">
+    <input type="hidden" name="entryId" value="${escapeHtml(id)}" />
+    <label for="payment-amount">Amount (USD)</label>
+    <input id="payment-amount" name="amount" type="text" inputmode="decimal" placeholder="200.00" required />
+    <label for="payment-memo">Memo</label>
+    <input id="payment-memo" name="memo" type="text" />
+    <label for="payment-provider">Provider</label>
+    <select id="payment-provider" name="provider">
+      <option value="stripe">Stripe</option>
+      <option value="paypal">PayPal</option>
+    </select>
+    <button type="submit">Create payment link</button>
+  </form>`
+    : '<p class="state-empty">No payment provider is configured — set STRIPE_SECRET_KEY or PAYPAL_CLIENT_ID/PAYPAL_CLIENT_SECRET to enable payment links.</p>';
+
+  return `${list}${createForm}`;
+}
+
+/** Human-readable byte size (KB/MB) — a small local helper, mirroring the other per-page render helpers on this file. */
+function formatBytes(sizeBytes: number | undefined): string {
+  if (sizeBytes === undefined) return '';
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * One row per file: a `driveLink` renders as an anchor to the Drive file
+ * (D1 success outcome); an email-only file (Drive failed/disabled, the
+ * buffer was emailed as an attachment by the host per DRV-02) renders the
+ * filename with a plain label instead — this admin view never has (and
+ * never persists, T-04-19) the file's bytes to link or download itself.
+ * escapeHtml on every value (Convention 6, T-04-20).
+ */
+function renderFileRowHtml(file: FileRecord): string {
+  const name = escapeHtml(file.filename ?? '(unnamed file)');
+  const meta = [formatBytes(file.sizeBytes), file.mime ? escapeHtml(file.mime) : '']
+    .filter(Boolean)
+    .join(' — ');
+  const metaHtml = meta ? ` <span class="file-meta">(${meta})</span>` : '';
+  const linkOrLabel =
+    file.storage === 'drive' && file.driveLink
+      ? `<a href="${escapeHtml(file.driveLink)}" target="_blank" rel="noopener noreferrer">${name}</a>`
+      : `${name} <span class="file-meta">(emailed as attachment)</span>`;
+  return `<li>${linkOrLabel}${metaHtml}</li>`;
+}
+
+/** Renders the Files section body: real getFilesByEntry rows (EMPTY state when none) — replaces the "no file storage yet" placeholder (DRV-01). */
+function renderFilesSectionHtml(entryFiles: FileRecord[]): string {
+  if (entryFiles.length === 0) {
+    return '<p class="state-empty">No files were uploaded with this submission.</p>';
+  }
+  return `<ul>${entryFiles.map(renderFileRowHtml).join('')}</ul>`;
+}
+
+/** Supplements renderGeoLine's City/Region/Country line with lat/lon/postal/isp — never re-implements renderGeoLine's own formatting. */
+function renderGeoDetailHtml(geo: Geo | undefined): string {
+  const line = renderGeoLine(geo);
+  const lineHtml = line ? `<p>${escapeHtml(line)}</p>` : '';
+  if (!geo) return lineHtml || '<p>(no geo data)</p>';
+
+  const extra: string[] = [];
+  if (geo.lat !== undefined && geo.lon !== undefined) extra.push(`Lat/Lon: ${escapeHtml(`${geo.lat}, ${geo.lon}`)}`);
+  if (geo.postal) extra.push(`Postal: ${escapeHtml(geo.postal)}`);
+  if (geo.isp) extra.push(`ISP: ${escapeHtml(geo.isp)}`);
+  const extraHtml = extra.length > 0 ? `<ul>${extra.map((e) => `<li>${e}</li>`).join('')}</ul>` : '';
+
+  return lineHtml + extraHtml || '<p>(no geo data)</p>';
+}
+
+let bodyHtml: string;
+
+if (error) {
+  Astro.response.status = 500;
+  bodyHtml = `<h1>Entry</h1><p role="alert" class="state-error">Unable to load this entry right now — please try again.</p>`;
+} else if (!entry) {
+  Astro.response.status = 404;
+  bodyHtml = `
+    <h1>Entry not found</h1>
+    <p class="state-empty">No entry exists with id "${escapeHtml(id)}".</p>
+    <p><a href="${escapeHtml(entriesUrl)}">&larr; Back to Entries</a></p>
+  `;
+} else {
+  const turnstileFlagHtml =
+    entry.fields._turnstile === 'failed' ? `<p><span class="flag-turnstile">bot-check failed</span></p>` : '';
+
+  const statusForm = `<form method="post" action="${escapeHtml(actionUrl)}">
+    <input type="hidden" name="id" value="${escapeHtml(entry.id)}" />
+    <input type="hidden" name="action" value="status" />
+    <label for="status-select">New status</label>
+    <select id="status-select" name="status">
+      ${ENTRY_STATUSES.map(
+        (s) => `<option value="${s}"${entry!.status === s ? ' selected' : ''}>${escapeHtml(s)}</option>`,
+      ).join('')}
+    </select>
+    <button type="submit">Update status</button>
+  </form>`;
+
+  const deleteForm = `<form method="post" action="${escapeHtml(actionUrl)}">
+    <input type="hidden" name="id" value="${escapeHtml(entry.id)}" />
+    <input type="hidden" name="action" value="delete" />
+    <label><input type="checkbox" required /> Confirm permanent delete</label>
+    <button type="submit">Delete entry</button>
+  </form>`;
+
+  const purgeForm = `<form method="post" action="${escapeHtml(actionUrl)}">
+    <input type="hidden" name="id" value="${escapeHtml(entry.id)}" />
+    <input type="hidden" name="action" value="purge" />
+    <label><input type="checkbox" required /> Confirm erase ALL data for this visitor</label>
+    <button type="submit">Purge visitor (GDPR erasure)</button>
+  </form>`;
+
+  bodyHtml = `
+    <p><a href="${escapeHtml(entriesUrl)}">&larr; Back to Entries</a></p>
+    <h1>Entry ${escapeHtml(entry.id)}</h1>
+    ${turnstileFlagHtml}
+    <section>
+      <h2>Fields</h2>
+      ${renderFieldsHtml(entry.fields)}
+    </section>
+    <section>
+      <h2>Geo</h2>
+      ${renderGeoDetailHtml(entry.geo)}
+    </section>
+    <section>
+      <h2>Journey</h2>
+      ${renderJourneyTimelineHtml(entry.journey)}
+    </section>
+    <section>
+      <h2>Files</h2>
+      ${renderFilesSectionHtml(files)}
+    </section>
+    <section>
+      <h2>Status</h2>
+      ${statusForm}
+    </section>
+    <section>
+      <h2>Payments</h2>
+      ${renderPaymentsSectionHtml(payments)}
+    </section>
+    <section>
+      <h2>Delete</h2>
+      ${deleteForm}
+    </section>
+    <section>
+      <h2>Purge visitor (GDPR erasure)</h2>
+      ${purgeForm}
+    </section>
+  `;
+}
+
+const pageHtml = renderAdminPageHtml({
+  title: entry ? `Entry ${entry.id} — Admin` : 'Entry — Admin',
+  active: 'entries',
+  trailingSlash,
+  bodyHtml,
+});
+---
+
+<Fragment set:html={pageHtml} />

@@ -1,0 +1,73 @@
+---
+/**
+ * GET /forms-admin/entries (ADMN-02) — the default admin landing view (D4:
+ * operational first). Lists ALL entries (any status) with filter/search/
+ * pagination over storage.listEntries/countEntries. Server-rendered only,
+ * no client framework (design spec §5.6). Route injection consolidated in
+ * P05 Task 3 (integration.ts).
+ *
+ * B2 (checker): synthetic `_payment_request` anchor rows (03-05's /forms-pay
+ * page) are excluded from the on-screen list by default via
+ * `applyEntriesDefaultExclusion` + a visible show/hide chip
+ * (`renderPaymentRequestChipHtml`). The "Export CSV" link below
+ * (renderEntryTableHtml -> buildExportQueryString) deliberately keeps
+ * FULL-DUMP semantics — it never carries `excludeFormId` and always
+ * includes `_payment_request` rows regardless of the chip's state (T-02-28
+ * "export routes -> the entire filtered dataset" precedent, matching
+ * export-csv.ts's own independent `parseEntryFilter` call, which never sees
+ * this exclusion either). The chip governs the on-screen list only.
+ */
+import config from 'virtual:cool-astro-forms/config';
+import type { Entry } from '../../types.js';
+import { logError } from '../log.js';
+import { getDb } from '../storage/db.js';
+import { SqliteStorage } from '../storage/sqlite.js';
+import {
+  applyEntriesDefaultExclusion,
+  parseEntryFilter,
+  renderAdminPageHtml,
+  renderEntryTableHtml,
+  renderPaymentRequestChipHtml,
+} from './_shared.js';
+
+export const prerender = false;
+
+type ConfigWithTrailingSlash = typeof config & { trailingSlash?: 'always' | 'never' | 'ignore' };
+const trailingSlash = (config as ConfigWithTrailingSlash).trailingSlash;
+
+const filter = applyEntriesDefaultExclusion(parseEntryFilter(Astro.url.searchParams), Astro.url.searchParams);
+
+let entries: Entry[] | undefined;
+let total = 0;
+let error = false;
+
+try {
+  const storage = new SqliteStorage(getDb(config.dbPath));
+  const [fetchedEntries, fetchedTotal] = await Promise.all([
+    storage.listEntries(filter),
+    storage.countEntries(filter),
+  ]);
+  entries = fetchedEntries;
+  total = fetchedTotal;
+} catch (err) {
+  logError('admin.entries-query-failed', err);
+  error = true;
+  Astro.response.status = 500;
+}
+
+const bodyHtml =
+  '<h1>Entries</h1>' +
+  renderPaymentRequestChipHtml(Astro.url.searchParams, trailingSlash) +
+  renderEntryTableHtml({
+    entries,
+    total,
+    filter,
+    trailingSlash,
+    basePath: '/forms-admin/entries',
+    error,
+  });
+
+const pageHtml = renderAdminPageHtml({ title: 'Entries — Admin', active: 'entries', trailingSlash, bodyHtml });
+---
+
+<Fragment set:html={pageHtml} />

@@ -1,0 +1,26 @@
+---
+// Navigation target for the leaving-link trigger drill and the View
+// Transitions journey drill (Task 2) — carries no form of its own.
+import { ClientRouter } from 'astro:transitions';
+---
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cool-astro-forms playground — page two</title>
+    <ClientRouter />
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+      nav a { margin-right: 1rem; }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/two">Page two</a>
+      <a href="/plain">Plain (no ClientRouter)</a>
+    </nav>
+    <h1>Page two</h1>
+    <p>This page has no form — it exists to be navigated to and away from.</p>
+  </body>
+</html>

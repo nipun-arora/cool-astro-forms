@@ -1,0 +1,56 @@
+# publish.yml — the ONE GitHub Actions workflow in this repository.
+#
+# Rule 13 carve-out (this project is otherwise local-first: hooks run tests,
+# lint, typecheck, build, and the prod-audit gate on the developer's own
+# machine before every commit/push; there is no CI-gated merge queue and no
+# GitHub PR flow). This workflow exists SOLELY because `npm publish
+# --provenance` requires GitHub-hosted OIDC (GitHub Actions is the only
+# identity provider npm's provenance attestation currently trusts) — it is
+# not a deploy gate, not a test runner, and not a required check on any
+# branch. It NEVER triggers on push or pull_request. It is dispatched by
+# hand, once, when a maintainer has already run the full local gate
+# (typecheck + unit + e2e + build + quickstart + npm pack --dry-run + prod
+# audit — see CONTRIBUTING.md) and decided a version is ready to publish.
+#
+# npm publish itself, GitHub repository creation, and the npm account name
+# are all owner-gated actions outside this phase's scope — this workflow
+# makes publishing POSSIBLE, it does not publish anything by existing.
+
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "publish" to confirm you have already run the full local gate (see CONTRIBUTING.md) and reviewed the pre-publish security checklist.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.event.inputs.confirm == 'publish'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build -w packages/astro-forms
+
+      - name: Publish with provenance
+        run: npm publish --provenance --access public -w packages/astro-forms
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

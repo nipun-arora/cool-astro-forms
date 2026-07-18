@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "types": ["node"],
+    // Only `src/cli.ts` + `src/cli/*.ts` use literal `.ts`-extension
+    // relative imports (rest of the package keeps the usual `.js`-suffixed
+    // convention, which esbuild/Vite already map to sibling `.ts` files).
+    // The CLI needs real `.ts` specifiers because it's also run directly
+    // by `node` (no bundler) in cli.test.ts — Node's native loader has no
+    // `.js`-resolves-to-`.ts` fallback. Permitted here because both actual
+    // invocations already satisfy the required noEmit/emitDeclarationOnly
+    // precondition: `tsc --noEmit` (typecheck) and `tsc --emitDeclarationOnly`
+    // (build).
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src"]
+}

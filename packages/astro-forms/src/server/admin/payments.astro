@@ -1,0 +1,58 @@
+---
+/**
+ * GET /forms-admin/payments (D5) — the full Payments admin list view:
+ * status/amount/provider/created + provider/status filters + pagination,
+ * wired to real data via `listPayments`/`countPayments` (StorageAdapter,
+ * 03-01). Replaces the Phase-1.5/Phase-2 static EMPTY-state scaffold now
+ * that Stripe/PayPal quote-first pay-links exist (03-03/03-06).
+ * Server-rendered only, no client framework (design spec §5.6). Route
+ * injection consolidated in P05 Task 3 (integration.ts) — unchanged this
+ * plan.
+ */
+import config from 'virtual:cool-astro-forms/config';
+import type { Payment } from '../../types.js';
+import { logError } from '../log.js';
+import { getDb } from '../storage/db.js';
+import { SqliteStorage } from '../storage/sqlite.js';
+import { parsePaymentFilter, renderAdminPageHtml, renderPaymentsTableHtml } from './_shared.js';
+
+export const prerender = false;
+
+type ConfigWithTrailingSlash = typeof config & { trailingSlash?: 'always' | 'never' | 'ignore' };
+const trailingSlash = (config as ConfigWithTrailingSlash).trailingSlash;
+
+const filter = parsePaymentFilter(Astro.url.searchParams);
+
+let payments: Payment[] | undefined;
+let total = 0;
+let error = false;
+
+try {
+  const storage = new SqliteStorage(getDb(config.dbPath));
+  const [fetchedPayments, fetchedTotal] = await Promise.all([
+    storage.listPayments(filter),
+    storage.countPayments(filter),
+  ]);
+  payments = fetchedPayments;
+  total = fetchedTotal;
+} catch (err) {
+  logError('admin.payments-query-failed', err);
+  error = true;
+  Astro.response.status = 500;
+}
+
+const bodyHtml =
+  '<h1>Payments</h1>' +
+  renderPaymentsTableHtml({
+    payments,
+    total,
+    filter,
+    trailingSlash,
+    basePath: '/forms-admin/payments',
+    error,
+  });
+
+const pageHtml = renderAdminPageHtml({ title: 'Payments — Admin', active: 'payments', trailingSlash, bodyHtml });
+---
+
+<Fragment set:html={pageHtml} />

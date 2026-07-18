@@ -1,0 +1,86 @@
+---
+/**
+ * GET /forms-pay/success (PAY-05) — the Stripe Checkout `success_url`
+ * landing page. A "Confirming your payment…" HOLDING STATE ONLY.
+ *
+ * T-03-22 (spoofing / fake fulfillment): a browser landing on this page
+ * proves a REDIRECT happened, NOT that a payment was captured — Stripe
+ * fires `success_url` as soon as Checkout completes client-side, which can
+ * race or even precede the webhook, and a visitor can hand-craft this URL
+ * with an arbitrary `session_id` regardless of payment outcome. This page
+ * MUST NEVER flip `payments.status` to `'paid'` or write ANYTHING to
+ * storage — the inbound Stripe webhook (03-07) is the sole source of truth
+ * for payment completion. `session_id` is read from the query for DISPLAY
+ * ONLY (a courtesy confirmation-in-progress line), never looked up or acted
+ * on. Renders its own minimal shell — not `renderAdminPageHtml` (public,
+ * unauthenticated page).
+ */
+export const prerender = false;
+
+// Display-only — never used to query storage or flip any state (see docstring).
+const sessionId = Astro.url.searchParams.get('session_id');
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Confirming your payment…</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: system-ui, sans-serif;
+        background: #f5f5f5;
+        color: #1a1a1a;
+        text-align: center;
+      }
+      main {
+        max-width: 26rem;
+        margin: 1.5rem;
+        padding: 2rem;
+        background: #fff;
+        border-radius: 0.5rem;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+      }
+      h1 {
+        margin: 0 0 0.75rem;
+        font-size: 1.25rem;
+      }
+      p {
+        margin: 0 0 0.5rem;
+        color: #444;
+        font-size: 0.95rem;
+      }
+      .session {
+        font-family: ui-monospace, monospace;
+        font-size: 0.8rem;
+        color: #888;
+        word-break: break-all;
+      }
+      a {
+        color: #2563eb;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Confirming your payment…</h1>
+      <p>
+        Thanks — we're finalizing your payment now. This can take a few moments; you don't need to do anything else
+        on this page.
+      </p>
+      <p>If you paid by card, you'll receive a receipt from Stripe by email shortly.</p>
+      {sessionId && <p class="session">Reference: {sessionId}</p>}
+      <p><a href="/">&larr; Return home</a></p>
+    </main>
+  </body>
+</html>

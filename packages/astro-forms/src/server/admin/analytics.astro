@@ -1,0 +1,86 @@
+---
+/**
+ * GET /forms-admin/analytics (ANLY-01 render, D4 tab) — the captured to
+ * converted funnel, the abandonment rate, the top-drop-off fields table,
+ * and a system-health line (DB size, oldest unconverted abandoned row,
+ * last notify success). Everything renders an EMPTY state gracefully — a
+ * fresh install has zero form_starts rows until client capture ships in
+ * P07. Route injection consolidated in this plan's Task 3 (integration.ts).
+ *
+ * The panel's HTML is built by _shared.ts's renderAnalyticsPanelHtml — kept
+ * OUT of this frontmatter deliberately (see that function's own docstring:
+ * a confirmed @astrojs/compiler parser bug around this exact shape of
+ * ternary/template-literal-heavy frontmatter logic).
+ */
+import fs from 'node:fs';
+import config from 'virtual:cool-astro-forms/config';
+import type { AnalyticsFilter, DropOffRow, FunnelCounts } from '../../types.js';
+import { logError } from '../log.js';
+import { getNotifyHealth } from '../notify.js';
+import { getDb } from '../storage/db.js';
+import { SqliteStorage } from '../storage/sqlite.js';
+import { renderAdminPageHtml, renderAnalyticsPanelHtml } from './_shared.js';
+
+export const prerender = false;
+
+type ConfigWithTrailingSlash = typeof config & { trailingSlash?: 'always' | 'never' | 'ignore' };
+const trailingSlash = (config as ConfigWithTrailingSlash).trailingSlash;
+
+const params = Astro.url.searchParams;
+const analyticsFilter: AnalyticsFilter = {
+  siteId: params.get('siteId') || undefined,
+  formId: params.get('formId') || undefined,
+};
+
+let funnel: FunnelCounts | undefined;
+let dropOff: DropOffRow[] = [];
+let error = false;
+let oldestUnconvertedAt: number | undefined;
+
+try {
+  const storage = new SqliteStorage(getDb(config.dbPath));
+  const fetchedFunnel = await storage.getFunnel(analyticsFilter);
+  const fetchedDropOff = await storage.getTopDropOff(analyticsFilter);
+  funnel = fetchedFunnel;
+  dropOff = fetchedDropOff;
+
+  // listEntries has no ascending-sort mode (always ORDER BY created_at
+  // DESC) -- a limit:1 DESC query would silently report the NEWEST
+  // abandoned row as "oldest" (a correctness bug). Fetch every abandoned
+  // row and take the LAST element instead; bounded in practice by
+  // purgeExpired's retentionDays sweep (only abandoned rows ever expire).
+  const allAbandoned = await storage.listEntries({ status: 'abandoned' });
+  const oldestAbandoned = allAbandoned[allAbandoned.length - 1];
+  oldestUnconvertedAt = oldestAbandoned ? oldestAbandoned.createdAt : undefined;
+} catch (err) {
+  logError('admin.analytics-query-failed', err);
+  error = true;
+  Astro.response.status = 500;
+}
+
+let dbSizeBytes: number | undefined;
+try {
+  dbSizeBytes = fs.statSync(config.dbPath).size;
+} catch {
+  dbSizeBytes = undefined;
+}
+
+const notifyHealth = getNotifyHealth();
+
+const panelHtml = renderAnalyticsPanelHtml({
+  funnel,
+  dropOff,
+  health: {
+    dbSizeBytes,
+    oldestUnconvertedAt,
+    lastNotifySuccessAt: notifyHealth.lastSuccessAt ?? undefined,
+  },
+  error,
+});
+
+const bodyHtml = `<h1>Analytics</h1>${panelHtml}`;
+
+const pageHtml = renderAdminPageHtml({ title: 'Analytics — Admin', active: 'analytics', trailingSlash, bodyHtml });
+---
+
+<Fragment set:html={pageHtml} />

@@ -1,0 +1,127 @@
+---
+/**
+ * GET /forms-admin/login (ADMN-01) — the admin password login form. Split
+ * page/handler: this page only renders; POST /forms-admin/auth (auth.ts)
+ * authenticates. No client framework (design spec §5.6) — plain HTML/CSS,
+ * server-rendered only.
+ *
+ * Ships as RAW SOURCE (research packaging pitfall — tsup cannot compile
+ * .astro pages); route injection making this reachable is consolidated in
+ * P05, which also owns this file's package.json exports-map entry.
+ */
+import config from 'virtual:cool-astro-forms/config';
+import { adminUrl } from './_shared.js';
+
+export const prerender = false;
+
+const trailingSlash = config.trailingSlash;
+const actionUrl = adminUrl('/forms-admin/auth', trailingSlash);
+const hasError = Astro.url.searchParams.get('error') === '1';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Admin Login</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: system-ui, sans-serif;
+        background: #f5f5f5;
+        color: #1a1a1a;
+      }
+      .login {
+        width: 100%;
+        max-width: 22rem;
+        margin: 1.5rem;
+        padding: 2rem;
+        background: #fff;
+        border-radius: 0.5rem;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+        box-sizing: border-box;
+      }
+      h1 {
+        margin: 0 0 1.25rem;
+        font-size: 1.25rem;
+      }
+      label {
+        display: block;
+        margin-bottom: 0.35rem;
+        font-weight: 600;
+        font-size: 0.9rem;
+      }
+      input[type='password'] {
+        width: 100%;
+        padding: 0.6rem 0.75rem;
+        font-size: 1rem;
+        border: 1px solid #ccc;
+        border-radius: 0.35rem;
+        box-sizing: border-box;
+      }
+      input[type='password']:focus-visible {
+        outline: 2px solid #2563eb;
+        outline-offset: 1px;
+      }
+      button {
+        width: 100%;
+        margin-top: 1.25rem;
+        padding: 0.65rem 0.75rem;
+        font-size: 1rem;
+        font-weight: 600;
+        color: #fff;
+        background: #2563eb;
+        border: none;
+        border-radius: 0.35rem;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #1d4ed8;
+      }
+      button:focus-visible {
+        outline: 2px solid #1d4ed8;
+        outline-offset: 2px;
+      }
+      .error {
+        margin: 0 0 1rem;
+        padding: 0.6rem 0.75rem;
+        border-radius: 0.35rem;
+        background: #fef2f2;
+        color: #991b1b;
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="login">
+      <h1>Admin Login</h1>
+      {
+        hasError && (
+          <p class="error" role="alert">
+            Incorrect password. Please try again.
+          </p>
+        )
+      }
+      <form method="post" action={actionUrl}>
+        <label for="password">Password</label>
+        <input
+          id="password"
+          name="password"
+          type="password"
+          autocomplete="current-password"
+          required
+        />
+        <button type="submit">Sign in</button>
+      </form>
+    </main>
+  </body>
+</html>

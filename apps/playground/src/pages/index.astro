@@ -1,0 +1,191 @@
+---
+// Demo page (PKG-03 proof): the whole "drop-in adoption" story is
+// `coolForms()` in astro.config.mjs + this ONE `data-caf="demo"` attribute
+// on an otherwise ordinary form. Everything else on this page (styling,
+// status text, the AJAX submit wiring below) is playground-only demo
+// scaffolding, not part of the package's adoption contract.
+import { ClientRouter } from 'astro:transitions';
+---
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cool-astro-forms playground</title>
+    <ClientRouter />
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+      label { display: block; margin-top: 1rem; font-weight: 600; }
+      input, textarea { width: 100%; padding: 0.5rem; font: inherit; box-sizing: border-box; }
+      button { margin-top: 1.5rem; padding: 0.6rem 1.2rem; font: inherit; cursor: pointer; }
+      #caf-submit-status { margin-top: 1rem; font-weight: 600; }
+      .caf-honeypot { position: absolute; left: -9999px; top: -9999px; opacity: 0; height: 0; overflow: hidden; }
+      nav a { margin-right: 1rem; }
+      .caf-tour { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid #ddd; }
+      .caf-tour dt { font-weight: 600; margin-top: 1rem; }
+      .caf-tour dd { margin: 0.25rem 0 0; color: #333; }
+      .caf-tour code { background: #f3f3f3; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    </style>
+  </head>
+  <body>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/two">Page two</a>
+      <a href="/plain">Plain (no ClientRouter)</a>
+    </nav>
+    <h1>cool-astro-forms playground</h1>
+    <p>
+      Type into the form below, then leave without submitting (exit-intent, click the
+      "Page two" link, switch tabs, or close the tab) to trigger an abandonment capture.
+      Submitting converts the abandoned partial.
+    </p>
+
+    <form data-caf="demo" method="post" action="/api/upload">
+      <label for="name">Name</label>
+      <input type="text" id="name" name="name" autocomplete="name" />
+
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" autocomplete="email" />
+
+      <label for="phone">Phone</label>
+      <input type="tel" id="phone" name="phone" autocomplete="tel" />
+
+      <label for="details">Details</label>
+      <textarea id="details" name="details" rows="4"></textarea>
+
+      <label>
+        <input type="checkbox" name="confirmed" value="yes" />
+        I confirm these details are accurate
+      </label>
+
+      <!-- Honeypot: visually hidden, real fillable input (not type=hidden) so
+           naive bots that fill every field trip it. HONEYPOT_FIELD_NAME from
+           the package's types.ts. Real visitors never see or fill this. -->
+      <div class="caf-honeypot" aria-hidden="true">
+        <label for="_caf_hp">Leave this field empty</label>
+        <input type="text" id="_caf_hp" name="_caf_hp" tabindex="-1" autocomplete="off" />
+      </div>
+
+      <button type="submit">Submit</button>
+    </form>
+
+    <p id="caf-submit-status"></p>
+
+    <section class="caf-tour" aria-labelledby="caf-tour-heading">
+      <h2 id="caf-tour-heading">Every shipped feature, live or one env var away</h2>
+      <p>
+        This page is the whole adoption contract in miniature: the
+        <code>coolForms()</code> call in <code>astro.config.mjs</code> plus the
+        one <code>data-caf="demo"</code> attribute on the form above. Everything
+        below is either already running on this instance or one environment
+        variable away — nothing here needs a rebuild.
+      </p>
+      <dl>
+        <dt>Abandonment capture + journey tracking (live now)</dt>
+        <dd>
+          Type into the form above, then leave without submitting — click
+          <a href="/two">Page two</a>, switch tabs, or close the tab. Try the
+          same form with <a href="/plain">no View Transitions</a> too; both
+          paths land a row. Each captured row's page-to-page path is the
+          journey trail, visible on its admin detail page.
+        </dd>
+        <dt>Analytics — captured→converted funnel (live now)</dt>
+        <dd>
+          The first keystroke into the form fires a <code>form_started</code>
+          ping; abandoning or submitting closes the loop. Feeds
+          <code>/forms-admin/analytics</code>'s funnel and top-drop-off-field
+          breakdown below — no extra instrumentation.
+        </dd>
+        <dt>Admin UI (one env var)</dt>
+        <dd>
+          Set <code>FORMS_ADMIN_PASSWORD</code> and restart the dev server,
+          then visit <a href="/forms-admin/login">/forms-admin/login</a>.
+          Empty tables on a fresh checkout — populate a few realistic entries
+          first with <code>GET /api/debug-seed?action=seed</code> (DEV +
+          localhost only; reset with
+          <code>/api/debug-entries?action=reset</code>).
+        </dd>
+        <dt>Bot mitigation — Cloudflare Turnstile (one env var pair)</dt>
+        <dd>
+          Set <code>TURNSTILE_SITE_KEY</code> +
+          <code>TURNSTILE_SECRET_KEY</code> (Cloudflare publishes
+          ALWAYS-PASS/ALWAYS-FAIL dummy testing pairs — see
+          <code>astro.config.mjs</code>'s comment block for both) and restart;
+          the widget script auto-injects onto this exact page, no markup
+          change needed.
+        </dd>
+        <dt>Payments — Stripe/PayPal quote-first pay-links (one env var)</dt>
+        <dd>
+          Set <code>STRIPE_SECRET_KEY</code> or the PayPal trio and restart —
+          <code>/forms-pay?amount=200</code> becomes a real, server-priced
+          request-payment page. Full setup: <code>docs/payments.md</code> in
+          the repo root.
+        </dd>
+        <dt>Google Drive file uploads (needs a real Drive account)</dt>
+        <dd>
+          Set the <code>GOOGLE_DRIVE_*</code> triple from a one-time consent
+          script — see <code>docs/drive.md</code> in the repo root. The e2e
+          suite exercises the full round trip against a local mock
+          (<code>tests/drive-upload.spec.ts</code>) so this path is proven
+          without needing real Google credentials to review it.
+        </dd>
+        <dt>Lead recovery — one-shot follow-up email (config, not env)</dt>
+        <dd>
+          A real host sets <code>recovery: {'{'} enabled: true {'}'}</code> in
+          its own <code>coolForms()</code> config. Full setup, consent modes,
+          and the unsubscribe flow: <code>docs/recovery.md</code> in the repo
+          root.
+        </dd>
+        <dt>IP geolocation (automatic, needs a real public IP)</dt>
+        <dd>
+          On by default for every saved entry — silently skipped for
+          local/private IPs, so localhost demos never show a geo line; a
+          deployed instance populates it automatically via ipwhois.io.
+        </dd>
+      </dl>
+    </section>
+
+    <script>
+      // Playground-only AJAX submit wiring — NOT part of the package. Reads
+      // ALL form fields (including the hidden `_caf` journey envelope that
+      // capture.ts writes at submit-time) into a JSON body POSTed to the
+      // site's own /api/upload endpoint, which calls recordSubmission().
+      function initUploadForm(): void {
+        const form = document.querySelector<HTMLFormElement>('form[data-caf="demo"]');
+        if (!form) return;
+        if (form.dataset.cafUploadBound === 'true') return;
+        form.dataset.cafUploadBound = 'true';
+
+        form.addEventListener('submit', async (event) => {
+          event.preventDefault();
+          const status = document.getElementById('caf-submit-status');
+
+          const formData = new FormData(form);
+          const fields: Record<string, string> = {};
+          for (const [key, value] of formData.entries()) {
+            if (typeof value === 'string') fields[key] = value;
+          }
+
+          try {
+            const res = await fetch('/api/upload', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ fields }),
+            });
+            if (res.ok) {
+              window.caf?.submitted('demo');
+              form.reset();
+              if (status) status.textContent = 'Submitted — thank you.';
+            } else if (status) {
+              status.textContent = 'Submit failed — please try again.';
+            }
+          } catch {
+            if (status) status.textContent = 'Submit failed — network error.';
+          }
+        });
+      }
+
+      initUploadForm();
+      document.addEventListener('astro:page-load', initUploadForm);
+    </script>
+  </body>
+</html>

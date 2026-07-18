@@ -1,0 +1,20 @@
+{
+  "name": "cool-astro-forms-monorepo",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "test": "npm test -w packages/astro-forms",
+    "build": "npm run build -w packages/astro-forms",
+    "typecheck": "npm run typecheck -w packages/astro-forms",
+    "test:e2e": "playwright test",
+    "audit:prod": "npm audit --omit=dev --audit-level=high",
+    "verify:quickstart": "node scripts/verify-quickstart.mjs"
+  }
+}
