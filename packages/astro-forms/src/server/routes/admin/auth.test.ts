@@ -47,12 +47,19 @@ function fakeRedirect(path: string, status = 302): Response {
   return new Response(null, { status, headers: { Location: path } });
 }
 
+// Default request URL is plain http (dev/loopback-behind-proxy shape) so the
+// "secure: false" assertions below genuinely exercise a non-TLS request, not
+// an artifact of an always-https literal. The CSRF Origin check is entirely
+// independent of this URL — it only reads the Origin/Referer headers below.
+const DEFAULT_REQUEST_URL = 'http://example.com/forms-admin/auth';
+
 function makeRequest(
   body: Record<string, string>,
   headers: Record<string, string> = {},
+  url: string = DEFAULT_REQUEST_URL,
 ): Request {
   const form = new URLSearchParams(body);
-  return new Request('https://example.com/forms-admin/auth', {
+  return new Request(url, {
     method: 'POST',
     headers: { origin: 'https://example.com', ...headers },
     body: form,
@@ -61,10 +68,14 @@ function makeRequest(
 
 async function callPost(
   body: Record<string, string>,
-  opts: { headers?: Record<string, string>; clientAddress?: string } = {},
+  opts: {
+    headers?: Record<string, string>;
+    clientAddress?: string;
+    url?: string;
+  } = {},
 ): Promise<{ res: Response; cookies: FakeCookies }> {
   const cookies = makeFakeCookies();
-  const request = makeRequest(body, opts.headers);
+  const request = makeRequest(body, opts.headers, opts.url);
   const res = await POST({
     request,
     cookies,
@@ -115,6 +126,63 @@ describe('POST /forms-admin/auth', () => {
     const [, , options] = cookies.set.mock.calls[0]!;
     expect(options).toMatchObject({ secure: true });
   });
+
+  it('sets secure:true when the request itself is https, even without NODE_ENV=production', async () => {
+    const { cookies } = await callPost(
+      { password: 'correct-horse' },
+      { url: 'https://example.com/forms-admin/auth' },
+    );
+    const [, , options] = cookies.set.mock.calls[0]!;
+    expect(options).toMatchObject({ secure: true });
+  });
+
+  it('sets secure:true behind a proxy forwarding X-Forwarded-Proto: https, even without NODE_ENV=production', async () => {
+    const { cookies } = await callPost(
+      { password: 'correct-horse' },
+      {
+        url: 'http://example.com/forms-admin/auth',
+        headers: { 'x-forwarded-proto': 'https' },
+      },
+    );
+    const [, , options] = cookies.set.mock.calls[0]!;
+    expect(options).toMatchObject({ secure: true });
+  });
+
+  it('keeps secure:false for a plain http://localhost dev request with no forwarded-proto header', async () => {
+    const { cookies } = await callPost(
+      { password: 'correct-horse' },
+      { url: 'http://localhost:4321/forms-admin/auth' },
+    );
+    const [, , options] = cookies.set.mock.calls[0]!;
+    expect(options).toMatchObject({ secure: false });
+  });
+
+  it('does not force secure:true from a non-https X-Forwarded-Proto value', async () => {
+    const { cookies } = await callPost(
+      { password: 'correct-horse' },
+      {
+        url: 'http://localhost:4321/forms-admin/auth',
+        headers: { 'x-forwarded-proto': 'http' },
+      },
+    );
+    const [, , options] = cookies.set.mock.calls[0]!;
+    expect(options).toMatchObject({ secure: false });
+  });
+
+  it.each(['https', 'HTTPS', 'Https', 'https, http'])(
+    'treats X-Forwarded-Proto value %j as https (case-insensitive, leftmost entry of a proxy chain)',
+    async (headerValue) => {
+      const { cookies } = await callPost(
+        { password: 'correct-horse' },
+        {
+          url: 'http://example.com/forms-admin/auth',
+          headers: { 'x-forwarded-proto': headerValue },
+        },
+      );
+      const [, , options] = cookies.set.mock.calls[0]!;
+      expect(options).toMatchObject({ secure: true });
+    },
+  );
 
   it('rejects a wrong password: no cookie set, redirects to /forms-admin/login?error=1', async () => {
     const { res, cookies } = await callPost({ password: 'wrong-password' });

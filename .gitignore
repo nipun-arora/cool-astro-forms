@@ -21,3 +21,4 @@ playwright-report/
 # env / secrets
 .env
 .env.*
+.gstack/

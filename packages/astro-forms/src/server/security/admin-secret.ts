@@ -75,6 +75,10 @@ export function resolveAdminSecret(dbPath: string): string {
 
   const generated = randomBytes(32).toString('base64url');
   fs.mkdirSync(path.dirname(secretPath), { recursive: true });
-  fs.writeFileSync(secretPath, generated, 'utf8');
+  // mode 0o600 (owner read/write only, CWE-732): without it, a file freshly
+  // created under a permissive default umask (e.g. 022) is world-readable,
+  // exposing the HMAC signing key to any other local user/process. The
+  // owning process still reads it back fine (fs.readFileSync above).
+  fs.writeFileSync(secretPath, generated, { encoding: 'utf8', mode: 0o600 });
   return generated;
 }

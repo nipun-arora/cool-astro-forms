@@ -48,6 +48,13 @@ describe('resolveAdminSecret', () => {
     expect(filesInDir.length).toBeGreaterThan(0);
   });
 
+  it('persists the secret file with mode 0o600 (owner read/write only, CWE-732)', () => {
+    resolveAdminSecret(dbPath);
+    const secretPath = path.join(tmpDir, '.forms-admin-secret');
+    const mode = fs.statSync(secretPath).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
   it('returns the same persisted secret on a subsequent call (never regenerates)', () => {
     const first = resolveAdminSecret(dbPath);
     const second = resolveAdminSecret(dbPath);

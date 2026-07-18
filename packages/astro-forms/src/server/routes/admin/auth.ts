@@ -42,6 +42,38 @@ export function resetLoginRateLimiter(): void {
   loginRateLimiter.clear();
 }
 
+/**
+ * True when the request itself arrived over HTTPS: checked via the
+ * request's own URL first (TLS terminated at the Node/Astro process, or
+ * the dev server), then a single-value `X-Forwarded-Proto: https` header
+ * (TLS terminated upstream by the Passenger/Express reverse proxy this
+ * package targets, which forwards a plain HTTP request to the app). A
+ * comma-separated header (client, proxy1, proxy2, ...) is read
+ * left-to-right, per convention the leftmost entry is nearest the client.
+ *
+ * `NODE_ENV=production` alone under-covers non-production HTTPS deploys
+ * (staging/preview); checking the request avoids that gap while still
+ * leaving local `http://localhost` dev unaffected (no TLS, no header ->
+ * false). When TLS terminates at the app itself, `url.protocol` is the
+ * ground truth and the header is never consulted. When TLS terminates
+ * upstream (the proxy shape this package targets), the header is the
+ * ONLY signal available and an untrusted/unverified proxy topology could
+ * spoof it either direction — same accepted-risk boundary already flagged
+ * for `clientAddress` (T-01-35, security/rate-limit.ts), not re-litigated
+ * or solved here. `NODE_ENV === 'production'` at the call site remains an
+ * independent OR'd fallback regardless of this function's result.
+ */
+function isHttps(request: Request): boolean {
+  try {
+    if (new URL(request.url).protocol === 'https:') return true;
+  } catch {
+    // Malformed/relative request.url — fall through to the header check.
+  }
+  const forwardedProto = request.headers.get('x-forwarded-proto');
+  if (!forwardedProto) return false;
+  return forwardedProto.split(',')[0]?.trim().toLowerCase() === 'https';
+}
+
 type ConfigWithTrailingSlash = typeof config & { trailingSlash?: 'always' | 'never' | 'ignore' };
 
 /** Reads the submitted password from a form-urlencoded/multipart or JSON body. Never throws. */
@@ -93,7 +125,7 @@ export const POST: APIRoute = async ({ request, cookies, redirect, clientAddress
 
   cookies.set(ADMIN_SESSION_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: isHttps(request) || process.env.NODE_ENV === 'production',
     sameSite: 'strict',
     path: '/forms-admin',
     maxAge: sessionTtlDays * DAY_SECONDS,
