@@ -54,3 +54,5 @@ jobs:
         run: npm publish --provenance --access public -w packages/astro-forms
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+# (registration touch — force GitHub to index this workflow_dispatch workflow)
