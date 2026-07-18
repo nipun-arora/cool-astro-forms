@@ -17,7 +17,7 @@
  *
  * Written fresh against Cloudflare's documented explicit-rendering API
  * (developers.cloudflare.com/turnstile) — clean-room, not derived from any
- * WPForms source.
+ * commercial form-plugin source.
  */
 import { setTurnstileToken } from './capture.js';
 

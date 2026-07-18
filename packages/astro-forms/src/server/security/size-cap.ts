@@ -6,7 +6,7 @@
  * source of truth shared by client and server — never re-declared here.
  *
  * Clean-room: written fresh against the Fetch/Streams spec, not derived
- * from any WPForms source.
+ * from any commercial form-plugin source.
  */
 import { MAX_PAYLOAD_BYTES } from '../../limits.js';
 

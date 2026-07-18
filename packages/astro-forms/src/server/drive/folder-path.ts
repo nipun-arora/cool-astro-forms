@@ -8,7 +8,7 @@
  * a literal `\` and `'` inside a single-quoted string value.
  *
  * Clean-room: written fresh against the cited Drive docs, not derived from
- * any WPForms source.
+ * any commercial form-plugin source.
  */
 
 const MAX_NAME_LENGTH = 255;

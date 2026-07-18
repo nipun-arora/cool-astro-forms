@@ -2,7 +2,7 @@
  * deliver.ts tests — buildWebhookEvent / deliverWebhook retry+backoff /
  * registerWebhookTargets (HOOK-01). Fetch and the backoff scheduler are
  * both injected so this suite is entirely network-free and never depends
- * on real elapsed time. Clean-room, not derived from any WPForms source.
+ * on real elapsed time. Clean-room, not derived from any commercial form-plugin source.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WebhookTarget } from '../../types.js';

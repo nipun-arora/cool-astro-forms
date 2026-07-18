@@ -497,7 +497,7 @@ export function renderAnalyticsPanelHtml(opts: RenderAnalyticsPanelOptions): str
     `DB size: ${escapeHtml(fmtBytes(opts.health.dbSizeBytes))}`,
     `Oldest unconverted abandoned entry: ${escapeHtml(fmtTs(opts.health.oldestUnconvertedAt))}`,
     `Last notify success: ${escapeHtml(fmtTs(opts.health.lastNotifySuccessAt))}`,
-    'Reject counts: n/a (not persisted this phase — see the deferred rejection-persistence table in 02-CONTEXT.md)',
+    'Reject counts: n/a (not persisted in this version)',
   ];
   const healthHtml = '<ul>' + healthItems.map((item) => `<li>${item}</li>`).join('') + '</ul>';
 

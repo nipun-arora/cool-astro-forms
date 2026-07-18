@@ -20,7 +20,7 @@
  *
  * Clean-room: written fresh against the cited Google identity docs
  * (04-RESEARCH.md State of the Art, fetched live 2026-07-17), not derived
- * from any WPForms source. Token-exchange shape mirrors `paypal.ts`'s
+ * from any commercial form-plugin source. Token-exchange shape mirrors `paypal.ts`'s
  * `getAccessToken()` (form-encoded POST to a token endpoint, parse JSON,
  * never throw) — same codebase precedent, different provider.
  *

@@ -7,7 +7,7 @@
  * so a leaked/forwarded unsubscribe link never discloses an address.
  *
  * Clean-room: written fresh against the documented HMAC-token pattern, not
- * derived from any WPForms source.
+ * derived from any commercial form-plugin source.
  */
 import { createHmac } from 'node:crypto';
 import { explicitSecretMissingMessage, explicitSecretsRequired, resolveAdminSecret } from '../security/admin-secret.js';

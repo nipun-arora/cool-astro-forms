@@ -18,7 +18,7 @@
  *
  * Clean-room: written fresh against the RESEARCH.md no-durable-queue
  * decision and the real deliver.ts/sign.ts source, not derived from any
- * WPForms source.
+ * commercial form-plugin source.
  */
 import { createServer, type Server } from 'node:http';
 import { test, expect } from '@playwright/test';

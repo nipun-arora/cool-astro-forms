@@ -18,7 +18,7 @@
  * path as a thrown error (DRV-02).
  *
  * Clean-room: written fresh against developers.google.com Drive v3 REST
- * docs (04-RESEARCH.md Code Examples), not derived from any WPForms source.
+ * docs (04-RESEARCH.md Code Examples), not derived from any commercial form-plugin source.
  */
 import type { DriveLinkAccess, FileInput } from '../../types.js';
 import {

@@ -2,7 +2,7 @@
  * Visitor identity + consent gate (ABND-06).
  *
  * Written fresh against MDN document.cookie/Web Storage/Web Crypto specs —
- * clean-room, not derived from WPForms source.
+ * clean-room, not derived from commercial form-plugin source.
  *
  * The `_caf_uid` cookie is the server-authoritative identity signal (the
  * abandon route reads it from the request). The localStorage mirror exists

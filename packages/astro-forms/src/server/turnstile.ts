@@ -11,7 +11,7 @@
  *
  * Clean-room: written fresh against Cloudflare's documented siteverify
  * contract (developers.cloudflare.com/turnstile), not derived from any
- * WPForms source.
+ * commercial form-plugin source.
  */
 const SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const TIMEOUT_MS = 3000;

@@ -1,7 +1,7 @@
 /**
  * constant-time-compare.ts tests — the shared timing-safe compare extracted
  * from canary.ts's private tokensMatch() (T-01-41 length-guard convention).
- * Clean-room, not derived from any WPForms source.
+ * Clean-room, not derived from any commercial form-plugin source.
  */
 import { describe, expect, it } from 'vitest';
 import { tokensMatch } from './constant-time-compare.js';

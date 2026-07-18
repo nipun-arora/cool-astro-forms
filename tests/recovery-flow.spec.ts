@@ -19,8 +19,8 @@
  *    stubbing anything out.
  *
  * Clean-room: written fresh against the Plan 04-06/04-07/04-08 route/widget
- * source and the D3/D4/D4a CONTEXT decisions, not derived from any WPForms
- * source (RESEARCH.md established recovery has no WPForms precedent).
+ * source and the D3/D4/D4a CONTEXT decisions, not derived from any commercial WordPress form plugins
+ * source (RESEARCH.md established recovery has no commercial WordPress form plugins precedent).
  */
 import type { APIRequestContext } from '@playwright/test';
 import { test, expect } from '@playwright/test';

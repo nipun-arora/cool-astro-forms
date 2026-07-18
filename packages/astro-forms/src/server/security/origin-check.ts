@@ -8,7 +8,7 @@
  * protection the route gets and it must be hand-implemented (SEC-01 / T-01-08).
  *
  * Clean-room: written fresh against Fetch/URL spec semantics, not derived
- * from any WPForms source.
+ * from any commercial form-plugin source.
  */
 
 /** Parses a header value into its normalized URL.origin, or null if unusable. */

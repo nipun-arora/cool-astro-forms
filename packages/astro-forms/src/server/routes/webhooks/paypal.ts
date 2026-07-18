@@ -26,7 +26,7 @@
  * any body read.
  *
  * Clean-room: written fresh against 03-CONTEXT.md/03-RESEARCH.md, not
- * derived from any WPForms source.
+ * derived from any commercial form-plugin source.
  */
 import type { APIRoute } from 'astro';
 import config from 'virtual:cool-astro-forms/config';

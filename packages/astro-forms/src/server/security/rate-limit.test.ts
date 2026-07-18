@@ -3,7 +3,7 @@
  *
  * RESEARCH.md "Don't Hand-Roll": this hand-rolled token bucket is the ONE
  * documented, deliberate exception (single-process, no external dependency).
- * Clean-room, written fresh — not derived from any WPForms source.
+ * Clean-room, written fresh — not derived from any commercial form-plugin source.
  */
 import { describe, expect, it } from 'vitest';
 import { createRateLimiter, defaultRateLimiter, resetDefaultRateLimiter } from './rate-limit.js';

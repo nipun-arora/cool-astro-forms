@@ -3,7 +3,7 @@
  * Client field-capture + abandon-payload transport (ABND-01).
  *
  * Written fresh against MDN Navigator.sendBeacon / Fetch keepalive / DOM
- * event specs — clean-room, not derived from WPForms source.
+ * event specs — clean-room, not derived from commercial form-plugin source.
  *
  * This file's pure logic (stageFields, buildAbandonPayload, shouldSend) is
  * unit-tested directly in jsdom. The DOM wiring (four abandon triggers,

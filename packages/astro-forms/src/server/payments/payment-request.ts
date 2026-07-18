@@ -20,7 +20,7 @@
  * such field anywhere in this module's request-parsing surface (T-03-18).
  *
  * Clean-room: written fresh against 03-CONTEXT.md's D1-D4 decisions and
- * 03-RESEARCH.md's system diagram, not derived from any WPForms/legacy
+ * 03-RESEARCH.md's system diagram, not derived from any commercial form-plugin/legacy
  * source (a legacy `?pay=`-style quote page is the UX reference only, per
  * 03-CONTEXT.md).
  */

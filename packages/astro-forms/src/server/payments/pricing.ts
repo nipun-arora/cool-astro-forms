@@ -12,7 +12,7 @@
  *
  * Clean-room: written fresh against 03-CONTEXT.md's D3/D4 decisions and
  * 03-RESEARCH.md's Query-Amount Security Model, not derived from any
- * WPForms/legacy source.
+ * commercial form-plugin/legacy source.
  */
 import type { FeeLine, FeeBreakdown, FeeBreakdownLine } from '../../types.js';
 

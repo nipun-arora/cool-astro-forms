@@ -3,7 +3,7 @@
  * `cool-astro-forms/server` export the host site calls from its OWN submit
  * endpoint (ABND-04, PKG-03). Marks every matching abandoned row 'converted'
  * (kept, never deleted — funnel data preserved, the deliberate divergence
- * from WPForms' delete) and stitches the submission's journey onto a new
+ * from the delete-on-convert behavior common in WordPress form plugins) and stitches the submission's journey onto a new
  * 'submitted' entry with server-recomputed durations (JRNY-02) — reusing
  * Plan 06's `recomputeJourney`, never re-derived here.
  *
@@ -13,7 +13,7 @@
  * broken by this package. Malformed/absent journey envelopes are tolerated.
  *
  * Clean-room: written fresh against the Plan 01/02/06 contracts, not derived
- * from any WPForms source.
+ * from any commercial form-plugin source.
  */
 import { CONVERT_LOOKBACK_MS } from '../limits.js';
 import {

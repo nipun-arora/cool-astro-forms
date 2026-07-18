@@ -34,7 +34,7 @@
  * `BATCH_LIMIT` head-of-line pressure from unclaimed filtered rows is
  * transient and self-healing, not a permanent denial of service.
  *
- * Clean-room: written fresh against the Plan 01/04 contracts (no WPForms
+ * Clean-room: written fresh against the Plan 01/04 contracts (no commercial WordPress form plugins
  * precedent — RESEARCH.md established recovery has none).
  */
 import { z } from 'zod';

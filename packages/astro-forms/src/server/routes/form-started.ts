@@ -15,7 +15,7 @@
  * — a migration/open failure resolves a logged 500, not an unlogged crash).
  *
  * Clean-room: written fresh against the Plan 01/07 contracts, not derived
- * from any WPForms source.
+ * from any commercial form-plugin source.
  */
 import { z } from 'zod';
 import type { APIRoute } from 'astro';

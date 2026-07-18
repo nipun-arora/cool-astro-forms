@@ -33,7 +33,7 @@
  *
  * Clean-room: written fresh against 03-CONTEXT.md's D1-D4 decisions and the
  * real route/handler source (payment-request.ts, pay.astro, stripe.ts), not
- * derived from any WPForms/legacy source.
+ * derived from any commercial form-plugin/legacy source.
  */
 import { createServer, type Server } from 'node:http';
 import { test, expect } from '@playwright/test';

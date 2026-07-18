@@ -24,7 +24,7 @@
  *     wiring its `change` event to `capture.ts`'s `setRecoveryConsent()`.
  *
  * Written fresh against MDN CustomEvent/DOM specs — clean-room, not derived
- * from any WPForms source (no WPForms precedent exists for recovery).
+ * from any commercial form-plugin source (no commercial WordPress form plugins precedent exists for recovery).
  */
 import * as capture from './capture.js';
 

@@ -12,7 +12,7 @@
  * `deps.log` is reserved for request-reject/no-op events only.
  *
  * Clean-room: written fresh against the Plan 01-05 contracts, not derived
- * from any WPForms source.
+ * from any commercial form-plugin source.
  */
 import { z } from 'zod';
 import type { CoolFormsConfig } from '../../config.js';

@@ -5,7 +5,7 @@
  * exception in this project — a single-process, well-understood algorithm
  * where pulling in a rate-limiting library would add a dependency without
  * removing meaningful risk. Clean-room, written fresh, not derived from any
- * WPForms source.
+ * commercial form-plugin source.
  *
  * T-01-35 (accepted risk): per-IP limiting is best-effort under an
  * unverified proxy topology (Hostinger/Passenger `clientAddress` trust is a

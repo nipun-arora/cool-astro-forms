@@ -2,7 +2,7 @@
 
 A single automated follow-up email to a visitor who typed an email address
 into a form and then left without submitting — off by default, opt-out
-honored forever. No WPForms precedent exists for this feature (clean-room,
+honored forever. No WordPress-plugin precedent exists for this feature (clean-room,
 original design).
 
 Nothing below is required to use the rest of the package. With

@@ -1,6 +1,6 @@
 /**
  * sign.ts tests — HMAC-SHA256 `t=,v1=` outbound webhook signature scheme
- * (HOOK-01). Clean-room, not derived from any WPForms source.
+ * (HOOK-01). Clean-room, not derived from any commercial form-plugin source.
  */
 import { describe, expect, it } from 'vitest';
 import { signWebhookPayload, verifyWebhookSignature } from './sign.js';

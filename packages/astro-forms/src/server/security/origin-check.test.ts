@@ -1,6 +1,6 @@
 /**
  * origin-check.ts tests — clean-room, written fresh against MDN/Fetch spec
- * semantics for Origin/Referer headers, not derived from any WPForms source.
+ * semantics for Origin/Referer headers, not derived from any commercial form-plugin source.
  *
  * RESEARCH.md Pitfall 1: Astro's built-in security.checkOrigin does NOT cover
  * application/json requests. This explicit same-origin check is the ONLY

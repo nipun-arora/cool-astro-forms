@@ -1,7 +1,7 @@
 /**
  * admin-session.ts tests — HMAC-signed HttpOnly session token (D4, 7-day
  * default TTL). Research Pattern 2: `${exp}.${hmacSha256(String(exp), secret)}`.
- * Clean-room, not derived from any WPForms source.
+ * Clean-room, not derived from any commercial form-plugin source.
  */
 import { describe, expect, it } from 'vitest';
 import { issueSession, verifySession } from './admin-session.js';

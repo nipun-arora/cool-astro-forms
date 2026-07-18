@@ -6,16 +6,16 @@ explain how the project is actually run so a contribution lands cleanly.
 
 ## Clean-room statement
 
-This project is an independent, clean-room reimplementation of
-form-abandonment capture, user-journey tracking, notification, payment, and
-file-storage behaviors commonly found in WordPress form plugins and their
-addons. No source code from WPForms, WPForms Pro, or any WPForms addon
-(GPL-licensed) has been copied, translated, or otherwise incorporated into
-this repository — see [NOTICE](./NOTICE) for the full statement.
+This project is an independent, original implementation of form-abandonment
+capture, user-journey tracking, notification, payment, and file-storage
+features for Astro sites. No source code from any third-party form product —
+commercial or GPL-licensed — has been copied, translated, or otherwise
+incorporated into this repository — see [NOTICE](./NOTICE) for the full
+statement.
 
 Any contribution must uphold this: do not port, transcribe, or paraphrase
-code from WPForms or any other GPL-licensed forms plugin into this codebase.
-Product names ("WordPress", "WPForms") may only be used in a nominative,
+code from any GPL-licensed forms plugin into this codebase.
+Product names (for example "WordPress") may only be used in a nominative,
 descriptive sense (e.g. migration-comparison copy) — never implying
 affiliation, sponsorship, or endorsement.
 

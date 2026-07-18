@@ -4,7 +4,7 @@
  * the expiry itself is the signed payload, so verification is a single
  * signature check plus a numeric comparison, no JSON parsing on the hot
  * path. Clean-room, reusing the canary.ts node:crypto convention
- * (createHmac / tokensMatch), not derived from any WPForms source.
+ * (createHmac / tokensMatch), not derived from any commercial form-plugin source.
  */
 import { createHmac } from 'node:crypto';
 import { tokensMatch } from './constant-time-compare.js';

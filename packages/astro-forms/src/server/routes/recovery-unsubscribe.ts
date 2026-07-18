@@ -35,8 +35,8 @@
  * this one — this file only creates the route + its handler logic.
  *
  * Clean-room: written fresh against the Plan 04/D4 HMAC-token contract, not
- * derived from any WPForms source (RESEARCH.md established recovery has no
- * WPForms precedent).
+ * derived from any commercial form-plugin source (RESEARCH.md established recovery has no
+ * commercial WordPress form plugins precedent).
  */
 import type { APIRoute } from 'astro';
 import config from 'virtual:cool-astro-forms/config';

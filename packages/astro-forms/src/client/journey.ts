@@ -2,7 +2,7 @@
  * Client-side user-journey trail (JRNY-01).
  *
  * Written fresh against MDN localStorage/URL specs — clean-room, not derived
- * from WPForms source. Tracks page views into a capped localStorage trail:
+ * from commercial form-plugin source. Tracks page views into a capped localStorage trail:
  * `{url (query-stripped), title, ts, params?}`. The server (Plan 06) recomputes
  * per-step durations from `ts` deltas; this module never computes or ships a
  * client-side duration (JRNY-02).

@@ -13,7 +13,7 @@
  *
  * Clean-room: written fresh against developer.paypal.com/api/rest
  * (RESEARCH.md Code Examples, fetched 2026-07-17), not derived from any
- * WPForms source.
+ * commercial form-plugin source.
  */
 
 const TIMEOUT_MS = 5000;

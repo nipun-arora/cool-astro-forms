@@ -16,7 +16,7 @@
  * must never await it before their own response/return.
  *
  * Clean-room: written fresh against the RESEARCH.md no-queue decision, not
- * derived from any WPForms source.
+ * derived from any commercial form-plugin source.
  */
 import { monotonicFactory } from 'ulid';
 import type { WebhookEventType, WebhookTarget } from '../../types.js';

@@ -21,8 +21,8 @@
  *
  * Clean-room: written fresh against the Plan 04-02/04-05 drive.ts/
  * record-submission.ts source and the Drive v3 REST shape drive.ts itself
- * cites (developers.google.com), not derived from any WPForms source (no
- * WPForms precedent exists for file uploads to Drive).
+ * cites (developers.google.com), not derived from any commercial form-plugin source (no
+ * commercial WordPress form plugins precedent exists for file uploads to Drive).
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { test, expect } from '@playwright/test';

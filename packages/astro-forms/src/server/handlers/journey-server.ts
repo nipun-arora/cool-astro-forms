@@ -9,7 +9,7 @@
  * before a step is ever persisted or emailed.
  *
  * Clean-room: written fresh against the JourneyStep/ServerJourneyStep
- * contracts (Plan 01), not derived from any WPForms source.
+ * contracts (Plan 01), not derived from any commercial form-plugin source.
  */
 import {
   JOURNEY_MAX_AGE_MS,

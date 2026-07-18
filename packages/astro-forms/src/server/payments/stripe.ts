@@ -14,7 +14,7 @@
  * performs ZERO URL construction, templating, or slash manipulation.
  *
  * Clean-room: written fresh against docs.stripe.com/api (RESEARCH.md Code
- * Examples, fetched 2026-07-17), not derived from any WPForms source.
+ * Examples, fetched 2026-07-17), not derived from any commercial form-plugin source.
  */
 import Stripe from 'stripe';
 import { CHECKOUT_SESSION_TTL_MIN } from '../payment-constants.js';

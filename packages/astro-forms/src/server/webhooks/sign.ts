@@ -9,7 +9,7 @@
  * receiver can authenticate our outbound POSTs the same way we sign them.
  *
  * Clean-room: written fresh against the documented HMAC-timestamp pattern
- * (Stripe-style `t=,v1=` scheme), not derived from any WPForms source.
+ * (Stripe-style `t=,v1=` scheme), not derived from any commercial form-plugin source.
  */
 import { createHmac } from 'node:crypto';
 import { WEBHOOK_SIGNATURE_TOLERANCE_SEC } from '../payment-constants.js';
