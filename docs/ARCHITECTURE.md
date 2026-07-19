@@ -2,6 +2,7 @@
 
 > What actually exists in `packages/astro-forms/src` and how it fits together. Written 2026-07-17; Phase 4 (Drive + lead recovery) delta appended same day.
 > Companion: `docs/LESSONS.md` (why several of these shapes are the way they are).
+> Status: published to npm as `cool-astro-forms@0.1.1`.
 
 ## System shape
 
@@ -77,8 +78,14 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │         (journey timeline/fields/geo line), templatesModule override seam (Phase 3: + paymentQuote/paymentReceived)
 │    security/ — origin-check (full URL.origin, hard-reject mismatched Origin, Referer only when Origin absent),
 │         size-cap (precheck + readBodyCapped + backstop), rate-limit (token bucket, TTL eviction, reset hook),
-│         honeypot (_caf_hp), constant-time-compare (empty-buffer guard!), admin-session (HMAC, 7-day),
-│         admin-secret, turnstile.ts (siteverify, never-throws)
+│         honeypot (_caf_hp), constant-time-compare (empty-buffer guard!), admin-session (HMAC, 7-day;
+│         the session cookie's Secure flag is derived from the actual request — the request's own URL
+│         protocol first, then a validated single-value X-Forwarded-Proto header for deployments that
+│         terminate TLS at a reverse proxy — OR'd with NODE_ENV==='production', so a non-production HTTPS
+│         deploy still gets a Secure cookie instead of relying on NODE_ENV alone), admin-secret (the
+│         auto-generated HMAC signing key, when no explicit secret env var is set, is persisted to disk
+│         owner-only — file mode 0600 — rather than under the process's default umask), turnstile.ts
+│         (siteverify, never-throws)
 │    admin/ — raw-source .astro pages (login/entries/abandoned/payments/analytics/entry-detail) + _shared.ts
 │         (adminUrl(path, trailingSlash) — extension-segment exempt; parseEntryFilter; render helpers;
 │         analytics panel HTML built in .ts due to compiler bug — see LESSONS)
