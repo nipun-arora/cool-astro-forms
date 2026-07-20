@@ -1,6 +1,6 @@
 # cool-astro-forms
 
-Form-abandonment capture for Astro, plus the lead-operations layer around it. When a visitor types into your form and leaves without submitting, the lead is saved: recover, convert, and manage it from one self-hosted form backend with **zero external dependencies by default**, just a SQLite file and your existing SMTP env vars. 1,091 unit tests and a Playwright e2e suite cover it.
+Form-abandonment capture for Astro, plus the lead-operations layer around it. When a visitor types into your form and leaves without submitting, the lead is saved: recover, convert, and manage it from one self-hosted form backend with **zero external dependencies by default**, just a SQLite file and your existing SMTP env vars. 1,094 unit tests and a Playwright e2e suite cover it.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/nipun-arora/cool-astro-forms/blob/main/LICENSE)
 [![npm](https://img.shields.io/npm/v/cool-astro-forms.svg)](https://www.npmjs.com/package/cool-astro-forms)

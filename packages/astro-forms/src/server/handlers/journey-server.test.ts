@@ -46,6 +46,31 @@ describe('recomputeJourney — server-computed durations (JRNY-02)', () => {
   });
 });
 
+describe('recomputeJourney — external referrer seed (traffic source)', () => {
+  it('preserves external:true and the seed step origin so the traffic source survives recompute into storage and emails', () => {
+    const steps: JourneyStep[] = [
+      makeStep({ url: 'https://www.google.com/search', title: 'www.google.com', ts: 1000, external: true }),
+      makeStep({ url: 'https://geeksite.example/python-help/?q=1', title: 'Python Help', ts: 2000 }),
+    ];
+    const result = recomputeJourney(steps, 3000);
+    expect(result.steps[0]).toEqual(
+      expect.objectContaining({ url: 'https://www.google.com/search', external: true }),
+    );
+    // Internal steps stay privacy-stripped to pathname, no external key.
+    expect(result.steps[1]!.url).toBe('/python-help/');
+    expect(result.steps[1]).not.toHaveProperty('external');
+  });
+
+  it('never invents an external flag: a client sending external on an internal-looking step keeps the flag but still loses query strings', () => {
+    const steps: JourneyStep[] = [
+      makeStep({ url: 'https://evil.example/landing?session=abc', title: 'evil', ts: 1000, external: true }),
+    ];
+    const result = recomputeJourney(steps, 2000);
+    expect(result.steps[0]!.url).toBe('https://evil.example/landing');
+    expect(result.steps[0]!.external).toBe(true);
+  });
+});
+
 describe('recomputeJourney — server-side caps re-enforced', () => {
   it('drops oldest steps beyond JOURNEY_MAX_STEPS', () => {
     const steps: JourneyStep[] = Array.from({ length: JOURNEY_MAX_STEPS + 5 }, (_, i) =>

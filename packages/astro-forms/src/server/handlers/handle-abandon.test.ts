@@ -500,6 +500,32 @@ describe('handleAbandon — journey wiring', () => {
     expect(call.journey[0]!.duration).toBeUndefined();
   });
 
+  it('accepts the external referrer-seed flag through the payload schema and persists it (traffic source)', async () => {
+    const upsertAbandoned = vi.fn(
+      async (input: { journey?: unknown }): Promise<UpsertAbandonedResult> => ({
+        outcome: 'created',
+        entry: makeEntry({ journey: input.journey as never }),
+      }),
+    );
+    const journeyPayload = [
+      { url: 'https://www.google.com/', title: 'www.google.com', ts: 1000, external: true },
+      { url: '/b', title: 'B', ts: 4000 },
+    ];
+    const result = await handleAbandon(
+      makeInput({ body: { journey: journeyPayload } }),
+      makeDeps({
+        storage: makeFakeStorage({ upsertAbandoned: upsertAbandoned as never }),
+        now: () => 5000,
+      }),
+    );
+    expect(result.status).toBe(200);
+    const call = upsertAbandoned.mock.calls[0]![0] as { journey: Array<Record<string, unknown>> };
+    expect(call.journey[0]).toEqual(
+      expect.objectContaining({ url: 'https://www.google.com/', external: true }),
+    );
+    expect(call.journey[1]).not.toHaveProperty('external');
+  });
+
   it('threads config.journeyParams through recomputeJourney — params stripped from the stored entry by default', async () => {
     const upsertAbandoned = vi.fn(
       async (input: { journey?: unknown }): Promise<UpsertAbandonedResult> => ({

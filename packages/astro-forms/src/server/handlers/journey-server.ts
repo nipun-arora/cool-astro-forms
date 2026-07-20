@@ -43,6 +43,16 @@ function stripQueryServer(url: string): string {
   }
 }
 
+/** Query/hash stripped but origin KEPT — for external referrer-seed steps only. */
+function stripQueryKeepOrigin(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return url.split('#')[0]!.split('?')[0]!;
+  }
+}
+
 function serializedByteLength(steps: unknown[]): number {
   return new TextEncoder().encode(JSON.stringify(steps)).length;
 }
@@ -80,12 +90,19 @@ export function recomputeJourney(
   //    unless opts.journeyParams is true; url/title truncated to caps.
   //    Rebuilding a clean object here also structurally strips any
   //    unexpected extra property (e.g. a forged client `duration`).
+  //    The external referrer-seed flag survives, and an external step keeps
+  //    its ORIGIN (query still stripped) — that step IS the traffic source,
+  //    and reducing it to a bare pathname destroys exactly the information
+  //    the seed exists to carry.
   const privacyApplied: JourneyStep[] = sanitized.map((step) => {
     const cleaned: JourneyStep = {
-      url: stripQueryServer(step.url).slice(0, STEP_URL_MAX),
+      url: (step.external === true ? stripQueryKeepOrigin(step.url) : stripQueryServer(step.url)).slice(0, STEP_URL_MAX),
       title: step.title.slice(0, STEP_TITLE_MAX),
       ts: step.ts,
     };
+    if (step.external === true) {
+      cleaned.external = true;
+    }
     if (opts.journeyParams && step.params) {
       cleaned.params = step.params;
     }

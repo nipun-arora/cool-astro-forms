@@ -23,6 +23,7 @@ import {
   type FileUploadOutcome,
   type Geo,
   type JourneyStep,
+  type ServerJourneyStep,
   type WebhookEventType,
 } from '../types.js';
 import { DEFAULT_ATTACHMENT_FALLBACK_MAX_BYTES, DEFAULT_DRIVE_ROOT_FOLDER } from './drive-recovery-constants.js';
@@ -65,8 +66,8 @@ export type RecordSubmissionResult =
       ok: true;
       entryId: string;
       files?: FileUploadOutcome[];
-      /** Server-recomputed journey exactly as persisted on the entry — for the host's own notification email. Absent when no journey envelope arrived. */
-      journey?: JourneyStep[];
+      /** Server-recomputed journey exactly as persisted on the entry (durationMs stitched, referrer seed marked external) — for the host's own notification email. Absent when no journey envelope arrived. */
+      journey?: ServerJourneyStep[];
       /** Resolved IP geolocation exactly as persisted; absent when no lookup resolved. */
       geo?: Geo;
     }

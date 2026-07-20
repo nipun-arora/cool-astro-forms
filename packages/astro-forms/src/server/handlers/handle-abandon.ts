@@ -75,6 +75,8 @@ const journeyStepSchema: z.ZodType<JourneyStep> = z.object({
   title: z.string(),
   ts: z.number(),
   params: z.record(z.string(), z.string()).optional(),
+  /** Referrer-seed marker from the client trail — the step that carries the traffic source. */
+  external: z.boolean().optional(),
 });
 
 const abandonPayloadSchema = z.object({

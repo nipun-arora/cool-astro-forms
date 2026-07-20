@@ -53,6 +53,8 @@ export interface JourneyStep {
   title: string;
   ts: number;
   params?: Record<string, string>;
+  /** True on the trail's seeded first step when the visitor arrived from another origin (the traffic source). */
+  external?: boolean;
 }
 
 /** Server-recomputed shape. Stored and notified journeys are always this type. */
