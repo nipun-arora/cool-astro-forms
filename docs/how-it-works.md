@@ -128,3 +128,26 @@ Two proofs ship in this repo, and both run without any external account:
 
 - **The playground:** `npm run dev -w apps/playground` with `FORMS_ADMIN_PASSWORD` set, then open `/forms-admin`. Every screenshot in this document comes from it. Dev-only debug seams (`/api/debug-entries`, `/api/debug-recovery?action=sweep`) let you reset state and run the real recovery sweep without waiting 60 minutes; both refuse to run outside a local dev build.
 - **The quickstart proof:** `node scripts/verify-quickstart.mjs` packs the real tarball, installs it into a scratch Astro project, builds, serves, fires a real abandon POST, and asserts the row landed in SQLite. The README's Quickstart is a transcription of this script, not the other way around.
+
+## Enriching your own notification email
+
+Your submit endpoint owns the email it sends, and `recordSubmission()` is built so you can fold the package's captured context into it. How much of this you use is your call; every piece works independently.
+
+- **Drive file links:** already in the result. Each entry of `files: FileUploadOutcome[]` is either a `driveLink` to include in your email, a `fallbackBuffer` to attach yourself, or `fallbackTooLarge`. See the Drive section above.
+- **Journey trail:** the hidden `_caf` field your form posts carries the visitor's page-by-page path as JSON (`{"journey":[...]}`). Parse it in your endpoint before you build the email, and pass the raw field through to `recordSubmission` unchanged so the entry still gets the stitched journey. Treat the parse as best-effort; the envelope can be absent or malformed and your email should not care.
+- **IP geolocation:** computed inside `recordSubmission` and stored on the entry, visible in `/forms-admin`. It is not returned to your endpoint yet; returning `journey` and `geo` on the ok-result is planned, which will replace the `_caf` parse above with one read.
+- **Abandoned leads** need none of this wiring: the abandoned-lead email the package sends to `notifyTo` already includes the journey trail and geolocation. If you prefer that no automated mail ever reaches the visitor, leave `recovery.enabled` off (the default) and the only emails are the ones to your own inbox; your team decides who to contact, with the full context in front of them.
+
+## Deploying behind a proxy
+
+Most production Node hosts (Hostinger, Passenger/LiteSpeed, most PaaS) terminate TLS before your Node process, so Astro sees a plain-HTTP socket. Astro only trusts the proxy's `X-Forwarded-Proto` header when your config sets `security.allowedDomains` (Astro 5.14.2 and later). Leave it unset and Astro reconstructs every request URL as `http://`, which makes its built-in CSRF check reject every urlencoded form POST to a server route with `403 Cross-site POST form submissions are forbidden`. The first place you will meet that error is the `/forms-admin` login form; payment form posts hit the same wall. Abandonment capture is immune because the beacon posts JSON, which the CSRF check does not inspect.
+
+The fix is one block in `astro.config.mjs`, using your real production domain:
+
+```js
+security: {
+  allowedDomains: [{ hostname: 'example.com', protocol: 'https' }],
+},
+```
+
+Found in production on the first live admin login of a proxied deployment; local dev and `node dist/server/entry.mjs` never show it because there is no proxy in front.

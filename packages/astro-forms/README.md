@@ -59,6 +59,16 @@ export default defineConfig({
 });
 ```
 
+> **Deploying behind a proxy?** Most production Node hosts (Hostinger, Passenger/LiteSpeed, most PaaS) terminate TLS before your Node process, so Astro sees a plain-HTTP socket. Astro only trusts the proxy's `X-Forwarded-Proto` header when `security.allowedDomains` is set (Astro 5.14.2+). Without it, every urlencoded form POST to a server route fails with `403 Cross-site POST form submissions are forbidden`, and the first place you will meet that is the `/forms-admin` login form. Add your real domain to the config once you deploy:
+>
+> ```js
+> security: {
+>   allowedDomains: [{ hostname: 'example.com', protocol: 'https' }],
+> },
+> ```
+>
+> Abandonment capture keeps working either way (it posts JSON, which Astro's CSRF check ignores); the break hits admin login and payment form posts.
+
 ### 3. Tag a form
 
 Add a `data-caf="<formId>"` attribute — no other markup changes are needed:

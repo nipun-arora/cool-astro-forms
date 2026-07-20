@@ -139,6 +139,14 @@ export function postInitInstructions(): string {
    (or set the same keys in your host's environment panel) — every one is
    optional and its feature stays inert until its variables are set.
 
+4. Deploying behind a proxy (Hostinger, Passenger, most production hosts)?
+   Add your real domain to astro.config.mjs or every urlencoded form POST
+   to a server route (starting with the /forms-admin login) fails with
+   "403 Cross-site POST form submissions are forbidden":
+     security: {
+       allowedDomains: [{ hostname: 'example.com', protocol: 'https' }],
+     },
+
 Docs:
   - README / quickstart:  https://github.com/nipun-arora/cool-astro-forms#readme
   - Payments setup:       https://github.com/nipun-arora/cool-astro-forms/blob/main/docs/payments.md
