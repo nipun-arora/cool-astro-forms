@@ -68,6 +68,34 @@ describe('stageFields', () => {
     const staged = stageFields(form);
     expect(new TextEncoder().encode(staged.notes!).length).toBeLessThanOrEqual(FIELD_MAX_BYTES);
   });
+
+  it('stages only the CHECKED radio of a group — an unchecked radio value never leaks into the lead (found live 2026-07-20: the last radio value won, mislabeling every captured lead)', () => {
+    const form = buildForm(`
+      <input name="email" value="a@b.com" />
+      <input type="radio" name="tier" value="quick" />
+      <input type="radio" name="tier" value="standard" checked />
+      <input type="radio" name="tier" value="urgent" />
+    `);
+    expect(stageFields(form)).toEqual({ email: 'a@b.com', tier: 'standard' });
+  });
+
+  it('stages a wholly UNCHECKED radio group as absent, not as the last value', () => {
+    const form = buildForm(`
+      <input name="email" value="a@b.com" />
+      <input type="radio" name="tier" value="quick" />
+      <input type="radio" name="tier" value="urgent" />
+    `);
+    expect(stageFields(form)).toEqual({ email: 'a@b.com' });
+  });
+
+  it('stages a checkbox only when checked — an unchecked consent box must not stage its static value', () => {
+    const form = buildForm(`
+      <input name="email" value="a@b.com" />
+      <input type="checkbox" name="confirmed" value="true" />
+      <input type="checkbox" name="newsletter" value="yes" checked />
+    `);
+    expect(stageFields(form)).toEqual({ email: 'a@b.com', newsletter: 'yes' });
+  });
 });
 
 describe('readHoneypot', () => {

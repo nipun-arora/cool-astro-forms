@@ -61,7 +61,15 @@ export interface RecordSubmissionDeps {
 }
 
 export type RecordSubmissionResult =
-  | { ok: true; entryId: string; files?: FileUploadOutcome[] }
+  | {
+      ok: true;
+      entryId: string;
+      files?: FileUploadOutcome[];
+      /** Server-recomputed journey exactly as persisted on the entry — for the host's own notification email. Absent when no journey envelope arrived. */
+      journey?: JourneyStep[];
+      /** Resolved IP geolocation exactly as persisted; absent when no lookup resolved. */
+      geo?: Geo;
+    }
   | { ok: false; error: string };
 
 /**
@@ -379,7 +387,13 @@ export async function recordSubmission(
 
     maybePurgeExpired(storage, now);
 
-    return fileOutcomes ? { ok: true, entryId: result.entry.id, files: fileOutcomes } : { ok: true, entryId: result.entry.id };
+    return {
+      ok: true,
+      entryId: result.entry.id,
+      ...(recomputed.steps.length > 0 ? { journey: recomputed.steps } : {}),
+      ...(geo ? { geo } : {}),
+      ...(fileOutcomes ? { files: fileOutcomes } : {}),
+    };
   } catch (err) {
     logError('record-submission.failed', err, { siteId: args.siteId, formId: args.formId });
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

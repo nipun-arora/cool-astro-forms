@@ -79,7 +79,12 @@ function truncateToBytes(value: string, maxBytes: number): string {
 }
 
 function getElementValue(el: Element): string | undefined {
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+  if (el instanceof HTMLInputElement) {
+    // Unchecked radio/checkbox must not stage its static value attr.
+    if ((el.type === 'radio' || el.type === 'checkbox') && !el.checked) return undefined;
+    return el.value;
+  }
+  if (el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
     return el.value;
   }
   return undefined;

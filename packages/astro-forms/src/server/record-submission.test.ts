@@ -281,6 +281,59 @@ describe('recordSubmission — visitor identity', () => {
 // Journey envelope
 // ---------------------------------------------------------------------------
 
+describe('recordSubmission — enrichment return (journey + geo for the host notification email)', () => {
+  it('returns the server-recomputed journey and resolved geo on the ok result, matching what was persisted', async () => {
+    const convertAndCreateSubmitted = vi.fn(async (_input: ConvertInput) => ({ converted: 0, entry: makeEntry() }));
+    const envelope = JSON.stringify({
+      journey: [
+        { url: '/a', title: 'A', ts: 1000 },
+        { url: '/b', title: 'B', ts: 4000 },
+      ],
+    });
+    const geo = { city: 'Dadri', region: 'Uttar Pradesh', country: 'India' };
+
+    const result = await recordSubmission(
+      {
+        siteId: 'demo-site',
+        formId: 'contact-form',
+        fields: { email: 'jane@example.com', [CAF_FIELD_NAME]: envelope },
+        ip: '203.0.113.9',
+        request: makeRequest('_caf_uid=visitor-1'),
+      },
+      { storage: makeFakeStorage({ convertAndCreateSubmitted }), now: () => 5000, geo: async () => geo },
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.journey).toEqual([
+        expect.objectContaining({ url: '/a', durationMs: 3000 }),
+        expect.objectContaining({ url: '/b', durationMs: 1000 }),
+      ]);
+      expect(result.geo).toEqual(geo);
+    }
+  });
+
+  it('omits geo and journey on the ok result when no lookup resolved and no envelope arrived', async () => {
+    const convertAndCreateSubmitted = vi.fn(async (_input: ConvertInput) => ({ converted: 0, entry: makeEntry() }));
+
+    const result = await recordSubmission(
+      {
+        siteId: 'demo-site',
+        formId: 'contact-form',
+        fields: { email: 'jane@example.com' },
+        request: makeRequest('_caf_uid=visitor-1'),
+      },
+      { storage: makeFakeStorage({ convertAndCreateSubmitted }), now: () => 5000 },
+    );
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.journey).toBeUndefined();
+      expect(result.geo).toBeUndefined();
+    }
+  });
+});
+
 describe('recordSubmission — journey envelope', () => {
   it('stitches server-recomputed durations from the fields._caf JSON-string envelope and strips _caf from persisted fields', async () => {
     const convertAndCreateSubmitted = vi.fn(async (_input: ConvertInput) => ({ converted: 0, entry: makeEntry() }));
