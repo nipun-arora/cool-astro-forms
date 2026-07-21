@@ -46,7 +46,13 @@ export async function verifyTurnstile(
   token: string | undefined,
   opts: VerifyTurnstileOptions,
 ): Promise<VerifyTurnstileResult> {
-  if (!token || !opts.secret) return { ok: false };
+  // No configured secret = module inert (config absence, not a client
+  // failure — no code). No token = a client-side failure that must carry
+  // Cloudflare's own code for it, so downstream diagnostics (reject logs,
+  // recovery-redirect ?code=) can distinguish clicked-before-solve from
+  // expired/reused without server access.
+  if (!opts.secret) return { ok: false };
+  if (!token) return { ok: false, errorCodes: ['missing-input-response'] };
 
   try {
     const body: Record<string, string> = { secret: opts.secret, response: token };

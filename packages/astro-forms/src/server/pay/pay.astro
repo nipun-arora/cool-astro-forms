@@ -194,6 +194,40 @@ const previewFeeLines = feeLines.map((line) => ({
               window.turnstile.render(container, { sitekey: sitekey, 'refresh-expired': 'auto' });
             }
           };
+          // Submit stays locked until the widget's token actually exists in
+          // the form (the widget writes the hidden input silently, and
+          // Cloudflare CLEARS it when a token expires) — a click can never
+          // post an empty token. Polled: no event fires on either change.
+          (function () {
+            var buttons = [];
+            var labels = [];
+            var ready = false;
+            function sync() {
+              var tok = document.querySelector('input[name="cf-turnstile-response"]');
+              var now = !!(tok && tok.value && tok.value.length > 100);
+              if (now === ready) return;
+              ready = now;
+              for (var i = 0; i < buttons.length; i++) {
+                buttons[i].disabled = !ready;
+                buttons[i].textContent = ready ? labels[i] : 'Verifying you are human...';
+              }
+            }
+            function arm() {
+              var found = document.querySelectorAll('form button[type="submit"]');
+              for (var i = 0; i < found.length; i++) {
+                buttons.push(found[i]);
+                labels.push(found[i].textContent);
+                found[i].disabled = true;
+                found[i].textContent = 'Verifying you are human...';
+              }
+              setInterval(sync, 300);
+            }
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', arm);
+            } else {
+              arm();
+            }
+          })();
         </script>
         <script
           is:inline

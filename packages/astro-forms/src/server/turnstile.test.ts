@@ -31,17 +31,17 @@ describe('verifyTurnstile — mocked siteverify responses', () => {
 });
 
 describe('verifyTurnstile — empty token/secret short-circuit (no fetch)', () => {
-  it('an absent token resolves {ok:false} WITHOUT calling fetch', async () => {
+  it('an absent token resolves {ok:false, errorCodes:[missing-input-response]} WITHOUT calling fetch — the no-token case must carry a diagnosable code like every siteverify rejection does', async () => {
     const fetchMock = mockFetch(async () => ({ json: async () => ({ success: true }) }));
     const result = await verifyTurnstile(undefined, { secret: 'sekret' });
-    expect(result).toEqual({ ok: false });
+    expect(result).toEqual({ ok: false, errorCodes: ['missing-input-response'] });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('an empty-string token resolves {ok:false} WITHOUT calling fetch', async () => {
+  it('an empty-string token resolves {ok:false, errorCodes:[missing-input-response]} WITHOUT calling fetch', async () => {
     const fetchMock = mockFetch(async () => ({ json: async () => ({ success: true }) }));
     const result = await verifyTurnstile('', { secret: 'sekret' });
-    expect(result).toEqual({ ok: false });
+    expect(result).toEqual({ ok: false, errorCodes: ['missing-input-response'] });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
