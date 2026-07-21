@@ -204,6 +204,14 @@ export async function handlePaymentRequest(
       // raw-JSON dead end. Programmatic clients keep the 403 JSON contract.
       if (input.headers.get('accept')?.includes('text/html')) {
         deps.log('payment-request.reject', { reason: 'turnstile', ip, recovery: 'redirect' });
+        // Surface WHICH Cloudflare code rejected the token in the redirect
+        // query — the visitor-facing URL becomes the diagnostic when server
+        // logs are out of reach. Sanitized to Cloudflare's own code grammar
+        // (lowercase words + hyphens) so a provider response can never
+        // inject into the query string.
+        const rawCode = (verified as { errorCodes?: string[] }).errorCodes?.[0];
+        const code = rawCode && /^[a-z0-9-]+$/.test(rawCode) ? rawCode : undefined;
+        const codeSuffix = code ? '&code=' + code : '';
         // Return the visitor to the page they actually paid from (a host may
         // own its own branded payment page) — but ONLY when the Referer is
         // same-origin with the configured siteUrl; anything else falls back
@@ -212,7 +220,8 @@ export async function handlePaymentRequest(
           deps.config.siteUrl +
           adminUrl('/forms-pay', deps.config.trailingSlash) +
           '?error=turnstile&amount=' +
-          centsToDollarsString(amountCents);
+          centsToDollarsString(amountCents) +
+          codeSuffix;
         const referer = input.headers.get('referer');
         if (referer) {
           try {
@@ -220,6 +229,7 @@ export async function handlePaymentRequest(
             if (refererUrl.origin === new URL(deps.config.siteUrl).origin) {
               refererUrl.searchParams.set('error', 'turnstile');
               refererUrl.searchParams.set('amount', centsToDollarsString(amountCents));
+              if (code) refererUrl.searchParams.set('code', code);
               return { status: 303, location: refererUrl.toString() };
             }
           } catch {

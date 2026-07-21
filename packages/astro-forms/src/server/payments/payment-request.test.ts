@@ -214,6 +214,39 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
     );
   });
 
+  it('turnstile fail recovery carries the first Cloudflare error code in the redirect (sanitized), so the visitor-facing URL names the cause without server access', async () => {
+    const verifyTurnstile = vi.fn(async () => ({ ok: false, errorCodes: ['timeout-or-duplicate', 'x'] }));
+    const deps = makeDeps({ verifyTurnstile, config: makeConfig({ trailingSlash: 'always' }) });
+    const headers = new Headers();
+    headers.set('Origin', 'https://example.com');
+    headers.set('Accept', 'text/html');
+    headers.set('Referer', 'https://example.com/secure/?pay=200');
+    const result = await handlePaymentRequest(
+      { body: 'amount=200&currency=usd', headers, ip: '203.0.113.5' },
+      deps,
+    );
+
+    expect(result.status).toBe(303);
+    expect(result.location).toBe(
+      'https://example.com/secure/?pay=200&error=turnstile&amount=200.00&code=timeout-or-duplicate',
+    );
+  });
+
+  it('a weird error code is sanitized out of the redirect (never a query-injection surface)', async () => {
+    const verifyTurnstile = vi.fn(async () => ({ ok: false, errorCodes: ['bad&code=<x>'] }));
+    const deps = makeDeps({ verifyTurnstile, config: makeConfig({ trailingSlash: 'always' }) });
+    const headers = new Headers();
+    headers.set('Origin', 'https://example.com');
+    headers.set('Accept', 'text/html');
+    const result = await handlePaymentRequest(
+      { body: 'amount=200&currency=usd', headers, ip: '203.0.113.5' },
+      deps,
+    );
+
+    expect(result.status).toBe(303);
+    expect(result.location).toBe('https://example.com/forms-pay/?error=turnstile&amount=200.00');
+  });
+
   it('turnstile fail recovery honors a SAME-ORIGIN Referer: 303 back to the host page the visitor paid from, its own query preserved, error + amount merged', async () => {
     const verifyTurnstile = vi.fn(async () => ({ ok: false }));
     const deps = makeDeps({ verifyTurnstile, config: makeConfig({ trailingSlash: 'always' }) });
