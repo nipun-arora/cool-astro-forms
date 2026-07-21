@@ -203,6 +203,24 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
     expect(verifyTurnstile).toHaveBeenCalledWith(undefined, '203.0.113.5');
   });
 
+  it('a fetch client (Accept: application/json) gets 200 {ok:true, url} instead of a 302 — XHR submits cannot follow cross-origin redirects, and edge bot-challenges cannot intercept XHR the way they break navigation POSTs', async () => {
+    const deps = makeDeps();
+    const headers = new Headers();
+    headers.set('Origin', 'https://example.com');
+    headers.set('Accept', 'application/json');
+    const result = await handlePaymentRequest(
+      { body: 'amount=200&currency=usd', headers, ip: '203.0.113.5' },
+      deps,
+    );
+
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body ?? '{}')).toEqual({
+      ok: true,
+      url: 'https://checkout.stripe.com/session-1',
+    });
+    expect(result.location).toBeUndefined();
+  });
+
   it('a turnstile reject logs Cloudflare error-codes so production failures are diagnosable from the reject line alone', async () => {
     const verifyTurnstile = vi.fn(async () => ({ ok: false, errorCodes: ['timeout-or-duplicate'] }));
     const deps = makeDeps({ verifyTurnstile });

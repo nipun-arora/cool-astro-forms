@@ -50,6 +50,10 @@ export type PaymentRequestRejectReason =
 export interface PaymentRequestResponseBody {
   ok: boolean;
   reason?: PaymentRequestRejectReason;
+  /** Sanitized Cloudflare error code on a turnstile reject (fetch clients). */
+  code?: string;
+  /** Checkout URL on a fetch-client success — the client performs the hop as a plain GET. */
+  url?: string;
 }
 
 export interface HandlePaymentRequestInput {
@@ -123,6 +127,24 @@ export interface HandlePaymentRequestResult {
 
 function json(status: number, body: PaymentRequestResponseBody): HandlePaymentRequestResult {
   return { status, body: JSON.stringify(body) };
+}
+
+/**
+ * Success shape depends on the client's transport. A fetch/XHR client
+ * (Accept: application/json) gets `200 {ok:true, url}` and performs the
+ * checkout hop itself as a plain GET navigation — XHR cannot follow a
+ * cross-origin 302 usefully, and edge bot-challenges that break navigation
+ * POSTs (they cannot replay a POST body through an interstitial) never see
+ * an XHR. A form-navigation client keeps the 302 redirect.
+ */
+function succeed(
+  headers: Headers,
+  location: string,
+): HandlePaymentRequestResult {
+  if (headers.get('accept')?.includes('application/json')) {
+    return { status: 200, body: JSON.stringify({ ok: true, url: location }) };
+  }
+  return { status: 302, location };
 }
 
 function reject(
@@ -202,15 +224,15 @@ export async function handlePaymentRequest(
       // with a dead token. A browser form post must land back on the pay
       // page — fresh widget, error banner, amount preserved — never on a
       // raw-JSON dead end. Programmatic clients keep the 403 JSON contract.
+      // Surface WHICH Cloudflare code rejected the token — in the redirect
+      // query for navigations, in the JSON body for fetch clients. The
+      // visitor-facing surface becomes the diagnostic when server logs are
+      // out of reach. Sanitized to Cloudflare's own code grammar (lowercase
+      // words + hyphens) so a provider response can never inject anywhere.
+      const rawCode = (verified as { errorCodes?: string[] }).errorCodes?.[0];
+      const code = rawCode && /^[a-z0-9-]+$/.test(rawCode) ? rawCode : undefined;
       if (input.headers.get('accept')?.includes('text/html')) {
         deps.log('payment-request.reject', { reason: 'turnstile', ip, recovery: 'redirect' });
-        // Surface WHICH Cloudflare code rejected the token in the redirect
-        // query — the visitor-facing URL becomes the diagnostic when server
-        // logs are out of reach. Sanitized to Cloudflare's own code grammar
-        // (lowercase words + hyphens) so a provider response can never
-        // inject into the query string.
-        const rawCode = (verified as { errorCodes?: string[] }).errorCodes?.[0];
-        const code = rawCode && /^[a-z0-9-]+$/.test(rawCode) ? rawCode : undefined;
         const codeSuffix = code ? '&code=' + code : '';
         // Return the visitor to the page they actually paid from (a host may
         // own its own branded payment page) — but ONLY when the Referer is
@@ -238,7 +260,10 @@ export async function handlePaymentRequest(
         }
         return { status: 303, location: fallback };
       }
-      return reject(deps, 403, 'turnstile', { ip });
+      // Fetch clients get the code in the JSON body — same diagnostic the
+      // recovery redirect carries for navigations.
+      deps.log('payment-request.reject', { reason: 'turnstile', ip });
+      return json(403, code ? { ok: false, reason: 'turnstile', code } : { ok: false, reason: 'turnstile' });
     }
   }
 
@@ -293,7 +318,7 @@ export async function handlePaymentRequest(
         payLinkUrl: order.approvalUrl,
         providerRef: order.providerRef,
       });
-      return { status: 302, location: order.approvalUrl };
+      return succeed(input.headers, order.approvalUrl);
     }
 
     const session = await deps.createCheckoutSession({
@@ -313,7 +338,7 @@ export async function handlePaymentRequest(
       payLinkUrl: session.url,
       providerRef: session.providerRef,
     });
-    return { status: 302, location: session.url };
+    return succeed(input.headers, session.url);
   } catch (err) {
     logError('payment-request.storage-failed', err, { ip });
     return json(500, { ok: false, reason: 'error' });

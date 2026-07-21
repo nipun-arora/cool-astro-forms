@@ -204,7 +204,9 @@ const previewFeeLines = feeLines.map((line) => ({
             var ready = false;
             function sync() {
               var tok = document.querySelector('input[name="cf-turnstile-response"]');
-              var now = !!(tok && tok.value && tok.value.length > 100);
+              // Non-empty = armed; the server judges validity (Cloudflare's
+              // TEST keys mint short dummy tokens a length check would reject).
+              var now = !!(tok && tok.value && tok.value.length > 0);
               if (now === ready) return;
               ready = now;
               for (var i = 0; i < buttons.length; i++) {
@@ -322,6 +324,57 @@ const previewFeeLines = feeLines.map((line) => ({
       if (amountInput) {
         amountInput.addEventListener('input', recomputePreview);
       }
+    </script>
+    <script is:inline>
+      // Fetch transport (bubble-phase, after any capture-script listener has
+      // written its hidden fields): the session is created over XHR and the
+      // checkout hop happens as a plain GET via location.assign. Edge
+      // bot-challenges that break navigation POSTs (an interstitial cannot
+      // replay a POST body) never see an XHR, and the native form submit
+      // remains the no-JS fallback.
+      (function () {
+        var form = document.getElementById('pay-form');
+        if (!form || !window.fetch || !window.URLSearchParams) return;
+        form.addEventListener('submit', function (e) {
+          e.preventDefault();
+          var body = new URLSearchParams(new FormData(form));
+          if (e.submitter && e.submitter.name) {
+            body.append(e.submitter.name, e.submitter.value);
+          }
+          var buttons = form.querySelectorAll('button[type="submit"]');
+          for (var i = 0; i < buttons.length; i++) {
+            buttons[i].disabled = true;
+            buttons[i].textContent = 'Processing...';
+          }
+          var amount = body.get('amount') || '';
+          function bounce(reason, code) {
+            var q = '?error=' + encodeURIComponent(reason) + '&amount=' + encodeURIComponent(amount);
+            if (code && /^[a-z0-9-]+$/.test(code)) q += '&code=' + code;
+            window.location.assign(window.location.pathname + q);
+          }
+          fetch(form.action, {
+            method: 'POST',
+            headers: {
+              Accept: 'application/json',
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: body.toString(),
+          })
+            .then(function (res) {
+              return res.json();
+            })
+            .then(function (data) {
+              if (data && data.ok && data.url) {
+                window.location.assign(data.url);
+              } else {
+                bounce((data && data.reason) || 'error', data && data.code);
+              }
+            })
+            .catch(function () {
+              bounce('error');
+            });
+        });
+      })();
     </script>
   </body>
 </html>
