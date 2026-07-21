@@ -210,8 +210,8 @@ const previewFeeLines = feeLines.map((line) => ({
       {
         turnstileRetry && (
           <p role="alert" style="padding:0.6rem 0.75rem;background:#fef2f2;border:1px solid #fecaca;border-radius:0.35rem;color:#991b1b;font-size:0.9rem;">
-            The security check expired before your payment went through. It has been refreshed — please
-            press Pay again.
+            The security check expired before your payment went through. It has been refreshed.
+            Please press Pay again.
           </p>
         )
       }
@@ -244,7 +244,7 @@ const previewFeeLines = feeLines.map((line) => ({
             </tr>
           </tbody>
         </table>
-        <p class="preview-note">Preview — final total computed securely at checkout.</p>
+        <p class="preview-note">Preview only. The final total is computed securely at checkout.</p>
 
         {turnstileSiteKey && <div class="cf-turnstile" data-sitekey={turnstileSiteKey}></div>}
 

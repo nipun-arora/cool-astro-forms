@@ -204,14 +204,29 @@ export async function handlePaymentRequest(
       // raw-JSON dead end. Programmatic clients keep the 403 JSON contract.
       if (input.headers.get('accept')?.includes('text/html')) {
         deps.log('payment-request.reject', { reason: 'turnstile', ip, recovery: 'redirect' });
-        return {
-          status: 303,
-          location:
-            deps.config.siteUrl +
-            adminUrl('/forms-pay', deps.config.trailingSlash) +
-            '?error=turnstile&amount=' +
-            centsToDollarsString(amountCents),
-        };
+        // Return the visitor to the page they actually paid from (a host may
+        // own its own branded payment page) — but ONLY when the Referer is
+        // same-origin with the configured siteUrl; anything else falls back
+        // to the package pay page (no open-redirect surface from a header).
+        const fallback =
+          deps.config.siteUrl +
+          adminUrl('/forms-pay', deps.config.trailingSlash) +
+          '?error=turnstile&amount=' +
+          centsToDollarsString(amountCents);
+        const referer = input.headers.get('referer');
+        if (referer) {
+          try {
+            const refererUrl = new URL(referer);
+            if (refererUrl.origin === new URL(deps.config.siteUrl).origin) {
+              refererUrl.searchParams.set('error', 'turnstile');
+              refererUrl.searchParams.set('amount', centsToDollarsString(amountCents));
+              return { status: 303, location: refererUrl.toString() };
+            }
+          } catch {
+            // Malformed Referer — fall through to the package pay page.
+          }
+        }
+        return { status: 303, location: fallback };
       }
       return reject(deps, 403, 'turnstile', { ip });
     }
