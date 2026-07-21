@@ -28,6 +28,10 @@ const trailingSlash = (config as ConfigWithTrailingSlash).trailingSlash;
 
 const searchParams = Astro.url.searchParams;
 const baseAmountCents = parseAmountParam(searchParams);
+// Set by create-session's browser-post recovery redirect when a Turnstile
+// token arrived dead (expired/consumed). The reloaded page has a fresh
+// widget; this only explains why the visitor is back here.
+const turnstileRetry = searchParams.get('error') === 'turnstile';
 const currencyParam = searchParams.get('currency');
 const currency = (currencyParam ?? config.payments.requestPage.allowedCurrencies[0] ?? 'usd').toLowerCase();
 const feeParam = searchParams.get('fee');
@@ -183,7 +187,11 @@ const previewFeeLines = feeLines.map((line) => ({
           window.__cafPayTurnstileOnload = function () {
             var container = document.querySelector('.cf-turnstile');
             if (container && window.turnstile) {
-              window.turnstile.render(container, { sitekey: sitekey });
+              // refresh-expired 'auto' is Cloudflare's documented default but
+              // is pinned explicitly: a token dies after ~300s and the widget
+              // MUST re-arm in place, or a visitor who lingers submits a dead
+              // token behind a stale "Success!" badge.
+              window.turnstile.render(container, { sitekey: sitekey, 'refresh-expired': 'auto' });
             }
           };
         </script>
@@ -199,6 +207,14 @@ const previewFeeLines = feeLines.map((line) => ({
   <body>
     <main class="pay">
       <h1>Payment Request</h1>
+      {
+        turnstileRetry && (
+          <p role="alert" style="padding:0.6rem 0.75rem;background:#fef2f2;border:1px solid #fecaca;border-radius:0.35rem;color:#991b1b;font-size:0.9rem;">
+            The security check expired before your payment went through. It has been refreshed — please
+            press Pay again.
+          </p>
+        )
+      }
       {labelParam && <p class="memo">{labelParam}</p>}
       <form method="post" action={actionUrl} id="pay-form">
         <div>

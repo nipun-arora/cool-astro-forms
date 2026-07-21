@@ -193,6 +193,22 @@ export async function handlePaymentRequest(
     const token = params.get('cf-turnstile-response') ?? undefined;
     const verified = await deps.verifyTurnstile(token, ip);
     if (!verified.ok) {
+      // A Turnstile token is single-use and expires after ~300s, so a real
+      // visitor who dawdled on the page (or double-submitted) hits this gate
+      // with a dead token. A browser form post must land back on the pay
+      // page — fresh widget, error banner, amount preserved — never on a
+      // raw-JSON dead end. Programmatic clients keep the 403 JSON contract.
+      if (input.headers.get('accept')?.includes('text/html')) {
+        deps.log('payment-request.reject', { reason: 'turnstile', ip, recovery: 'redirect' });
+        return {
+          status: 303,
+          location:
+            deps.config.siteUrl +
+            adminUrl('/forms-pay', deps.config.trailingSlash) +
+            '?error=turnstile&amount=' +
+            centsToDollarsString(amountCents),
+        };
+      }
       return reject(deps, 403, 'turnstile', { ip });
     }
   }

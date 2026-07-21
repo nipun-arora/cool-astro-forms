@@ -203,6 +203,24 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
     expect(verifyTurnstile).toHaveBeenCalledWith(undefined, '203.0.113.5');
   });
 
+  it('turnstile fail on a BROWSER form post (Accept: text/html) -> 303 back to the pay page with error=turnstile + amount preserved, never a raw-JSON dead end', async () => {
+    const verifyTurnstile = vi.fn(async () => ({ ok: false }));
+    const deps = makeDeps({ verifyTurnstile, config: makeConfig({ trailingSlash: 'always' }) });
+    const headers = new Headers();
+    headers.set('Origin', 'https://example.com');
+    headers.set('Accept', 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8');
+    const result = await handlePaymentRequest(
+      { body: 'amount=200&currency=usd', headers, ip: '203.0.113.5' },
+      deps,
+    );
+
+    expect(result.status).toBe(303);
+    expect(result.location).toBe('https://example.com/forms-pay/?error=turnstile&amount=200.00');
+    expect(result.body).toBeUndefined();
+    expect(deps.storage.createEntry).not.toHaveBeenCalled();
+    expect(deps.createCheckoutSession).not.toHaveBeenCalled();
+  });
+
   it('verifyTurnstile configured + passes -> proceeds to checkout', async () => {
     const verifyTurnstile = vi.fn(async () => ({ ok: true }));
     const deps = makeDeps({ verifyTurnstile });

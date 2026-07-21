@@ -4,9 +4,21 @@ This package's zero-config default is a **persistent-disk, long-lived
 process**: SQLite on disk (`dbPath`, default `data/forms.db`), an
 auto-generated-and-persisted HMAC secret for admin sessions/unsubscribe
 links, and an in-process `Map` for rate-limit buckets. That default is
-correct and unchanged for a VPS, a Docker container with a volume, a
-Node-on-Hostinger/Render/Railway box — anywhere `data/` survives between
-requests and the process itself survives for more than one request.
+correct and unchanged for a VPS or a Docker container with a volume —
+anywhere `data/` survives between requests and the process itself
+survives for more than one request.
+
+**Git-deploy hosts rebuild the app directory on every release.** Verified
+in production on Hostinger (Backend deploys reship the app dir wholesale,
+taking `data/` with it); Render, Railway, and similar build-per-deploy
+hosts behave the same unless you attach a disk. The process is long-lived,
+so this is NOT the serverless case below — the fix is one line: point
+`dbPath` outside the deploy directory (for example
+`dbPath: process.env.CAF_DB_PATH ?? 'data/forms.db'` in your config, with
+the env var set to `../caf-data/forms.db` on the host). The package
+creates the directory itself, and the admin secret file follows `dbPath`,
+so both survive every release. Prove it once: save an entry, redeploy,
+confirm the row is still there.
 
 **Serverless hosts (Vercel, Netlify Functions, Cloudflare Workers/Pages
 Functions, and similar) break that assumption on two axes**, both because

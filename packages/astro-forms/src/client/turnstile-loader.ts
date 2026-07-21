@@ -25,6 +25,7 @@ interface TurnstileRenderOptions {
   sitekey: string;
   callback?: (token: string) => void;
   'error-callback'?: () => void;
+  'refresh-expired'?: 'auto' | 'manual' | 'never';
 }
 
 declare global {
@@ -68,6 +69,9 @@ export function renderWidgets(sitekey: string): void {
     turnstile.render(container, {
       sitekey,
       callback: setTurnstileToken,
+      // Pinned (documented default): re-arm in place when the ~300s token
+      // dies, and re-fire callback so the staged token stays fresh.
+      'refresh-expired': 'auto',
     });
   });
 }
