@@ -56,9 +56,14 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     // reaches the client, only this server-side read (byte-identical
     // pattern to routes/abandon.ts).
     const turnstileSecret = process.env.TURNSTILE_SECRET_KEY;
+    // remoteip is deliberately NOT passed: siteverify rejects a token when
+    // the bound IP differs from the solving IP, and dual-stack visitors
+    // routinely solve the challenge over IPv6 while the site request rides
+    // IPv4 (or the CDN-derived address differs) — a per-visitor hard-fail
+    // for honest users. Token single-use + the secret remain the gate.
     const verifyTurnstileDep = turnstileSecret
-      ? (token: string | undefined, clientIp: string) =>
-          verifyTurnstile(token, { secret: turnstileSecret, remoteip: clientIp })
+      ? (token: string | undefined, _clientIp: string) =>
+          verifyTurnstile(token, { secret: turnstileSecret })
       : undefined;
 
     // PAY-04: createPaypalOrder stays undefined (module inert, no PayPal

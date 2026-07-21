@@ -87,7 +87,9 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     // NEVER reaches the client, only this server-side read.
     const turnstileSecret = process.env.TURNSTILE_SECRET_KEY;
     const verifyToken = turnstileSecret
-      ? (token: string | undefined, clientIp: string) => verifyTurnstile(token, { secret: turnstileSecret, remoteip: clientIp })
+      ? // remoteip deliberately omitted — dual-stack visitors solve the
+        // challenge on one IP family and post on another (see create-session).
+        (token: string | undefined, _clientIp: string) => verifyTurnstile(token, { secret: turnstileSecret })
       : undefined;
 
     // D2 fix #1 (ADPT-01): 'storage' awaits the adapter-backed persistent

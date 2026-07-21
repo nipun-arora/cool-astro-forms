@@ -82,9 +82,11 @@ describe('POST /api/forms/abandon — Turnstile verifyToken wiring (D3/BOT-01)',
     };
     await deps.verifyToken?.('some-token', '203.0.113.5');
 
+    // remoteip deliberately absent: dual-stack visitors solve the challenge
+    // on one IP family and post on another, so binding the token to the
+    // server-derived IP hard-fails honest users (found live 2026-07-21).
     expect(verifyTurnstileMock).toHaveBeenCalledWith('some-token', {
       secret: 'test-secret',
-      remoteip: '203.0.113.5',
     });
   });
 });

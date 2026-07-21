@@ -193,6 +193,10 @@ export async function handlePaymentRequest(
     const token = params.get('cf-turnstile-response') ?? undefined;
     const verified = await deps.verifyTurnstile(token, ip);
     if (!verified.ok) {
+      const errorCodes = (verified as { errorCodes?: string[] }).errorCodes;
+      if (errorCodes && errorCodes.length > 0) {
+        deps.log('payment-request.reject', { reason: 'turnstile', errorCodes, ip });
+      }
       // A Turnstile token is single-use and expires after ~300s, so a real
       // visitor who dawdled on the page (or double-submitted) hits this gate
       // with a dead token. A browser form post must land back on the pay

@@ -131,7 +131,8 @@ describe('POST /api/forms/pay/create-session', () => {
     };
     expect(typeof deps.verifyTurnstile).toBe('function');
     await deps.verifyTurnstile?.('tok-123', '203.0.113.5');
-    expect(verifyTurnstileMock).toHaveBeenCalledWith('tok-123', { secret: 'test-secret', remoteip: '203.0.113.5' });
+    // remoteip deliberately absent — see abandon.test.ts's twin assertion.
+    expect(verifyTurnstileMock).toHaveBeenCalledWith('tok-123', { secret: 'test-secret' });
   });
 
   it('passes createPaypalOrder: undefined into deps when PayPal is not configured', async () => {

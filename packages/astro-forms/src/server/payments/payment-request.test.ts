@@ -203,6 +203,17 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
     expect(verifyTurnstile).toHaveBeenCalledWith(undefined, '203.0.113.5');
   });
 
+  it('a turnstile reject logs Cloudflare error-codes so production failures are diagnosable from the reject line alone', async () => {
+    const verifyTurnstile = vi.fn(async () => ({ ok: false, errorCodes: ['timeout-or-duplicate'] }));
+    const deps = makeDeps({ verifyTurnstile });
+    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd' }), deps);
+
+    expect(deps.log).toHaveBeenCalledWith(
+      'payment-request.reject',
+      expect.objectContaining({ reason: 'turnstile', errorCodes: ['timeout-or-duplicate'] }),
+    );
+  });
+
   it('turnstile fail on a BROWSER form post (Accept: text/html) -> 303 back to the pay page with error=turnstile + amount preserved, never a raw-JSON dead end', async () => {
     const verifyTurnstile = vi.fn(async () => ({ ok: false }));
     const deps = makeDeps({ verifyTurnstile, config: makeConfig({ trailingSlash: 'always' }) });
