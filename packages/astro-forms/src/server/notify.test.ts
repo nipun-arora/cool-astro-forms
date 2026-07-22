@@ -178,8 +178,10 @@ describe('sendAbandonedLeadEmail (jsonTransport)', () => {
 
   it('production notify.sent log omits field/journey content (no PII in prod logs)', async () => {
     process.env.NODE_ENV = 'production';
-    process.env.EMAIL_HOST = 'smtp.example.com';
-    process.env.EMAIL_PORT = '587';
+    // 127.0.0.1:1 refuses instantly; a remote hostname can black-hole on
+    // filtered networks and time the test out (seen live 2026-07-22).
+    process.env.EMAIL_HOST = '127.0.0.1';
+    process.env.EMAIL_PORT = '1';
     process.env.EMAIL_USER = 'user@example.com';
     process.env.EMAIL_PASS = 'super-secret';
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);

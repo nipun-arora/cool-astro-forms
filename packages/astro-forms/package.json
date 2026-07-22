@@ -1,9 +1,9 @@
 {
   "name": "cool-astro-forms",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "type": "module",
   "license": "MIT",
-  "description": "Drop-in form-abandonment capture, user-journey tracking, payments, and file storage for Astro server-output sites.",
+  "description": "The lead-ops platform for Astro forms: abandonment capture, recovery emails, quote payments, and a self-hosted admin. No external services, just SQLite and SMTP. MIT.",
   "keywords": [
     "astro-integration",
     "astro",

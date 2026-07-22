@@ -1,7 +1,6 @@
-# ARCHITECTURE — as built (Phases 1-4)
+# ARCHITECTURE — as built (Phases 1-4; see the 0.1.2-0.1.10 addendum at the end for post-launch deltas)
 
 > What actually exists in `packages/astro-forms/src` and how it fits together. Written 2026-07-17; Phase 4 (Drive + lead recovery) delta appended same day.
-> Companion: `docs/LESSONS.md` (why several of these shapes are the way they are).
 > Status: published to npm as `cool-astro-forms@0.1.1`.
 
 ## System shape
@@ -88,7 +87,7 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │         (siteverify, never-throws)
 │    admin/ — raw-source .astro pages (login/entries/abandoned/payments/analytics/entry-detail) + _shared.ts
 │         (adminUrl(path, trailingSlash) — extension-segment exempt; parseEntryFilter; render helpers;
-│         analytics panel HTML built in .ts due to compiler bug — see LESSONS)
+│         analytics panel HTML built in .ts, working around an Astro compiler bug)
 │    routes/ — thin Astro APIRoute wrappers; admin/export-csv (strips pagination limit — full dump),
 │         admin/export-db (better-sqlite3 db.backup snapshot), canary (Bearer CANARY_TOKEN, timingSafeEqual,
 │         aggregate only), form-started (idempotent); Phase 4: recovery-unsubscribe (public GET, HMAC
@@ -176,3 +175,14 @@ Before this package is published to npm, an adopting site can still take it as a
 ## Phase 4 playground demo (Drive + lead recovery)
 
 `apps/playground/astro.config.mjs` carries the `drive{}` VALUE knobs unconditionally (Drive activation is env-gated, `GOOGLE_DRIVE_*`, so the subtree's mere presence is inert everywhere else) but `recovery.enabled` reads `process.env.CAF_E2E_RECOVERY_ENABLED` — the ONE deviation from a literal `enabled:true`, because unlike Drive, `recovery.enabled` IS the activation switch itself (convention 11 above); hardcoding it true would have turned the widget/route/consent-write on for every OTHER dedicated e2e instance sharing the same config file (Turnstile/Admin/Payments), not just the one meant to demo it. Only `playwright.config.ts`'s dedicated `RECOVERY_URL` (4328) instance sets that env var. `apps/playground/src/pages/api/demo-submit.ts` (DEV/localhost-gated, never shipped) is the host-adoption reference for the `FileInput[]`→`recordSubmission()`→`FileUploadOutcome[]` contract a real site's own submit endpoint implements — mirrors `upload.ts`'s shape but adds real file bytes. `apps/playground/src/pages/api/debug-recovery.ts` is the DEV-only seam that makes the lazy, request-traffic-driven sweep observable inside a fast e2e run without a real 60-minute wait (see Test architecture above).
+
+## Post-launch addendum (0.1.2 - 0.1.10, 2026-07-20/21)
+
+Shipped against live production findings on the second consumer, one release per finding across 0.1.2-0.1.10. The architectural deltas over the Phases 1-4 text above:
+
+- **recordSubmission enrichment return**: the ok-result now carries `journey?: ServerJourneyStep[]` and `geo?: Geo` (absent-when-empty, matching the optional `files` convention) so a host's own notification email renders the trail, source, and location with one read. The server journey recompute preserves the client's `external` referrer-seed step (flag + origin) instead of privacy-stripping it — that step IS the traffic source.
+- **Client staging is checked-state-aware**: unchecked radios and checkboxes never stage their static `value` attribute (the checked radio wins its group; unchecked means absent).
+- **Turnstile posture, fully evolved**: `remoteip` is not sent to siteverify (dual-stack visitors solve on one IP family and post on the other); every rejection carries Cloudflare's error code (short-circuited absent tokens synthesize `missing-input-response`); rejections on the payment route are recoverable for browsers (redirect back to the ORIGINATING page via same-origin Referer with `error`/`amount`/`code` in the query) and diagnosable for fetch clients (`code` in the JSON body); widgets pin `refresh-expired:'auto'`; submit buttons are token-gated on presence-not-shape.
+- **Payment transports**: create-session is dual-dialect — `200 {ok:true,url}` for `Accept: application/json`, `302 Location` for navigations. The pay page submits over fetch and hops to checkout as a plain GET; native submit is the no-JS fallback. Edge bot-challenges structurally cannot complete on navigation POSTs; this transport is immune (docs/payments.md 3b).
+- **Host deployment contracts hardened**: proxy-fronted hosts need `security.allowedDomains` (Astro only trusts X-Forwarded-Proto when it is non-empty; without it every urlencoded POST dies in Astro's CSRF origin check) — README quickstart + how-it-works carry the snippet; git-deploy hosts rebuild the app dir per release, so `dbPath` must point OUTSIDE the deploy directory (serverless.md; the package mkdirs the target and the admin-secret file follows `dbPath`).
+- **templatesModule proven in production**: a host module default-exporting `{abandonedLead: NotifyTemplateFn}` fully rebrands the abandoned-lead email; the seam resolves via the emitted virtual config module with a project-root-absolute specifier.

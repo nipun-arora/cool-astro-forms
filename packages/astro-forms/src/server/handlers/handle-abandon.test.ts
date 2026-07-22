@@ -650,6 +650,22 @@ describe('handleAbandon — turnstile-flag seam (D3)', () => {
     expect(verifyToken).toHaveBeenCalledWith('tok-abc', '203.0.113.5');
   });
 
+  it('the _caf envelope is stripped from STORED fields (mirrors record-submission) while the token still reaches verifyToken', async () => {
+    const verifyToken = vi.fn(async () => ({ ok: true }));
+    const upsertAbandoned = vi.fn(
+      async (_input: { fields: Record<string, unknown> }): Promise<UpsertAbandonedResult> => ({ outcome: 'created', entry: makeEntry() }),
+    );
+    await handleAbandon(
+      makeInput({
+        body: { fields: { email: 'jane@example.com', _caf: JSON.stringify({ turnstileToken: 'tok-abc' }) } },
+      }),
+      makeDeps({ storage: makeFakeStorage({ upsertAbandoned: upsertAbandoned as never }), verifyToken }),
+    );
+    const stored = upsertAbandoned.mock.calls[0]![0];
+    expect(stored.fields).toEqual({ email: 'jane@example.com' });
+    expect(verifyToken).toHaveBeenCalledWith('tok-abc', '203.0.113.5');
+  });
+
   it('a missing _caf envelope resolves an undefined token, still passed to verifyToken', async () => {
     const verifyToken = vi.fn(async () => ({ ok: true }));
     const upsertAbandoned = vi.fn(async (): Promise<UpsertAbandonedResult> => ({ outcome: 'created', entry: makeEntry() }));

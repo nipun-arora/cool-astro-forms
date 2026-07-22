@@ -180,6 +180,15 @@ dev`/the production Node adapter do **not** auto-redirect a slashless
 request to its slashed form; a mismatched request 404s outright rather than
 silently working.
 
+## 3b. Transports: fetch first, navigation fallback (0.1.10)
+
+`POST /api/forms/pay/create-session` speaks two dialects, keyed on the `Accept` header:
+
+- **Fetch/XHR client** (`Accept: application/json`): success is `200 {ok:true, url}` and the CLIENT performs the checkout hop itself (`location.assign(url)` — a plain GET). Failures are JSON with `reason` and, on a Turnstile reject, a sanitized Cloudflare `code` (`missing-input-response` / `timeout-or-duplicate` / `invalid-input-response`).
+- **Form-navigation client** (`Accept: text/html`): success is the classic `302 Location:` redirect. A Turnstile reject 303s back to the page the visitor paid from (same-origin `Referer`, query preserved, `error=turnstile&amount=…&code=…` merged) or to `/forms-pay` when the Referer is absent/foreign.
+
+The shipped pay page uses fetch and keeps the native submit as its no-JS fallback, and a HOST-OWNED payment page should do the same. Why this exists: edge bot-challenges (Cloudflare Managed Challenge, Bot Fight Mode) cannot complete on a navigation POST — an interstitial cannot replay the POST body — so a challenged form submit dies as an opaque 503/wedged tab. XHR is unchallengeable by design and the follow-up GET challenges cleanly. Found in production when a zone's own challenge settings ate every real-browser submit while identical curl requests passed. Submit buttons stay locked until the Turnstile widget's token exists in the form (ANY non-empty value: test sitekeys mint short dummy tokens) and re-lock if Cloudflare expire-clears it.
+
 ## 4. PayPal approval-link expiry
 
 A PayPal order's approval link is time-limited — PayPal's documented

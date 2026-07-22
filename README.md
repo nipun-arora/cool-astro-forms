@@ -1,10 +1,15 @@
 # cool-astro-forms
 
-Form-abandonment capture for Astro, plus the lead-operations layer around it. When a visitor types into your form and leaves without submitting, the lead is saved: recover, convert, and manage it from one self-hosted form backend with **zero external dependencies by default**, just a SQLite file and your existing SMTP env vars. 1,101 unit tests and a Playwright e2e suite cover it.
+Catch the leads that leave your Astro forms without hitting submit.
+
+When a visitor types into your form and walks away, the lead is saved. Around that capture sits the complete lead-ops platform: recovery emails, quote payments, and a self-hosted admin, with **zero external services by default**, just a SQLite file and your existing SMTP env vars. 1,102 unit tests and a Playwright e2e suite cover it.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![npm](https://img.shields.io/npm/v/cool-astro-forms.svg)](https://www.npmjs.com/package/cool-astro-forms)
 
 ![Self-hosted form backend admin — Entries list with submitted and abandoned Astro form entries, filters, and CSV export](.github/assets/hero-admin.png)
+
+Running in production on a live services business: versions 0.1.2 through 0.1.10 each shipped from a real-world finding there. The stories are in [Hardened in production](#hardened-in-production).
 
 `cool-astro-forms` instruments the Astro forms you already have; it is not a form builder. It rebuilds the lead-capture layer WordPress sites assemble from premium form plugins and their paid addons as one MIT Astro integration for server-output sites, covering 5 stages:
 
@@ -14,7 +19,7 @@ Form-abandonment capture for Astro, plus the lead-operations layer around it. Wh
 - **Manage:** the `/forms-admin` UI (entries, abandoned leads, payments, analytics funnel, CSV + `.db` export)
 - **Integrate:** Google Drive uploads, signed outbound webhooks, and Cloudflare Turnstile spam control
 
-No other open-source package offers abandonment capture for Astro or static sites. The other 4 stages ship alongside it so a captured lead has somewhere to go.
+We haven't found another open-source package that offers abandonment capture for Astro or static sites. The other 4 stages ship alongside it so a captured lead has somewhere to go.
 
 ## Quickstart
 
@@ -26,13 +31,15 @@ Every step below is executed end-to-end by [`scripts/verify-quickstart.mjs`](./s
 npm install cool-astro-forms @astrojs/node
 ```
 
-Optional scaffold first — `init` writes a full `.env.example` (every optional env var this package reads) and appends `data/` to `.gitignore`:
+Requires Astro 6 or 7, a server-output adapter, and Node 22.12+. The install compiles `better-sqlite3` natively when no prebuilt binary matches your platform; if that build fails you need Python plus a C toolchain, or skip native modules entirely with the Turso/libSQL path ([docs/serverless.md](./docs/serverless.md)).
+
+Optional scaffold first: `init` writes a full `.env.example` (every optional env var this package reads) and appends `data/` to `.gitignore`:
 
 ```bash
 npx cool-astro-forms init
 ```
 
-`astro add cool-astro-forms` also works, but it inserts a **bare** `coolForms()` call that fails validation on your next `astro dev`/`astro build` — `siteId`, `siteUrl`, and each form's `notifyTo` are required, with no defaults. Replace the bare call with the snippet below.
+`astro add cool-astro-forms` also works, but it inserts a **bare** `coolForms()` call that fails validation on your next `astro dev`/`astro build`: `siteId`, `siteUrl`, and each form's `notifyTo` are required, with no defaults. Replace the bare call with the snippet below.
 
 ### 2. Configure `astro.config.mjs`
 
@@ -58,19 +65,11 @@ export default defineConfig({
 });
 ```
 
-> **Deploying behind a proxy?** Most production Node hosts (Hostinger, Passenger/LiteSpeed, most PaaS) terminate TLS before your Node process, so Astro sees a plain-HTTP socket. Astro only trusts the proxy's `X-Forwarded-Proto` header when `security.allowedDomains` is set (Astro 5.14.2+). Without it, every urlencoded form POST to a server route fails with `403 Cross-site POST form submissions are forbidden`, and the first place you will meet that is the `/forms-admin` login form. Add your real domain to the config once you deploy:
->
-> ```js
-> security: {
->   allowedDomains: [{ hostname: 'example.com', protocol: 'https' }],
-> },
-> ```
->
-> Abandonment capture keeps working either way (it posts JSON, which Astro's CSRF check ignores); the break hits admin login and payment form posts.
+Deploying behind a proxy or CDN? Production hosts that terminate TLS need one extra `security` line; see the note after step 4.
 
 ### 3. Tag a form
 
-Add a `data-caf="<formId>"` attribute — no other markup changes are needed:
+Add a `data-caf="<formId>"` attribute; no other markup changes are needed:
 
 ```html
 <form data-caf="contact" method="post" action="/api/contact">
@@ -87,23 +86,41 @@ npm run build
 node dist/server/entry.mjs
 ```
 
-The capture route is auto-injected at `/api/forms/abandon`. A visitor who types into that form and leaves lands a row in `data/forms.db` and a notification email at `notifyTo`. That is the entire adoption contract — one `coolForms()` call, one attribute. Payments, Drive uploads, lead recovery, and the admin UI stay completely inert until you opt in.
+The capture route is auto-injected at `/api/forms/abandon`. A visitor who types into that form and leaves lands a row in `data/forms.db` and a notification email at `notifyTo`. That is the entire adoption contract: one `coolForms()` call, one attribute. Payments, Drive uploads, lead recovery, and the admin UI stay inert until you opt in.
+
+> **Deploying behind a proxy?** Most production Node hosts (Hostinger, Passenger/LiteSpeed, most PaaS) terminate TLS before your Node process, so Astro sees a plain-HTTP socket and only trusts the proxy's `X-Forwarded-Proto` header when `security.allowedDomains` is set. Without it, every urlencoded form POST to a server route fails with `403 Cross-site POST form submissions are forbidden`, and the first place you will meet that is the `/forms-admin` login form. Add your real domain once you deploy:
+>
+> ```js
+> security: {
+>   allowedDomains: [{ hostname: 'example.com', protocol: 'https' }],
+> },
+> ```
+>
+> Abandonment capture keeps working either way (it posts JSON, which Astro's CSRF check ignores); the break hits admin login and payment form posts.
 
 ## How it works
 
 1. The injected client script stages fields as the visitor types. Passwords, `data-caf-ignore` fields, and card/CSRF-shaped names are never staged.
 2. Any of the 4 capture triggers POSTs the staged fields to `/api/forms/abandon`.
 3. The server gates the save (origin check, rate limit, honeypot, email-or-phone requirement), dedupes repeat abandons within a 60-minute window, and writes one SQLite row with the journey trail and geolocation attached.
-4. You get a notification email; the visitor sees a save-confirmed toast, and lead recovery (opt-in) sends one follow-up email with a link to finish.
+
+   ![Abandoned-leads view — every captured lead with its last-edited field, converted and bot-check columns](.github/assets/admin-abandoned.png)
+
+4. You get a notification email carrying the captured fields, the journey trail, the visitor's location, and the traffic source; the visitor sees a save-confirmed toast, and lead recovery (opt-in) sends one follow-up email with a link to finish.
+
+   ![The default abandoned-lead notification email: captured fields, journey trail with the referrer as step one, location line, and a link to the entry](.github/assets/email-notification.png)
 
    ![Lead-recovery toast telling the visitor their form progress is saved and a finish link is on the way](.github/assets/recovery-toast.png)
 
 5. A visitor who returns and submits converts: `recordSubmission()` marks the entry converted and stitches the full journey onto it.
+
+   ![Entry detail — the visitor's journey timeline from external referrer to captured fields, with the traffic source as step one](.github/assets/admin-entry-detail.png)
+
 6. `/forms-admin/analytics` turns `form_started` pings and captures into a funnel with abandonment rate and top drop-off fields.
 
    ![Form abandonment analytics — a 12 started, 8 abandoned, 1 submitted funnel with a 66.7% abandonment rate and top drop-off fields](.github/assets/admin-analytics.png)
 
-7. Payments close the loop: create a quote from any entry, or share `/forms-pay?amount=200`. The server recomputes every total, and only a verified provider webhook marks a payment paid.
+7. Payments close the loop: create a quote from any entry, or share `/forms-pay?amount=200`. The server recomputes every total, and only a verified provider webhook marks a payment paid. The pay page submits over fetch and hops to the provider as a plain GET, so edge bot-challenges (Cloudflare and friends) cannot break the checkout hop; see [`docs/payments.md`](./docs/payments.md) section 3b.
 
    ![Shareable payment-request page at /forms-pay with a server-computed fee breakdown](.github/assets/pay-page.png)
 
@@ -117,7 +134,7 @@ Every trigger, gate, and fallback in detail, with screenshots: [docs/how-it-work
 | User-journey tracking | Per-visitor page trail, shown on each entry's timeline |
 | IP geolocation | Every saved entry enriched (`GEO_PROVIDER` override supported); a failed lookup never blocks the save |
 | `/forms-admin` UI | Entries, abandoned, payments, analytics funnel, CSV + `.db` export; server-rendered, password-protected |
-| Payments | Quote-first Stripe Checkout + PayPal; shareable `/forms-pay?amount=` links; server-computed fees; inbound webhooks as the sole payment truth |
+| Payments | Quote-first Stripe Checkout + PayPal; shareable `/forms-pay?amount=` links; server-computed fees; fetch-first transport (edge-bot-challenge-proof checkout hop); inbound webhooks as the sole payment truth |
 | Spam control | Cloudflare Turnstile (soft-fail), honeypot, rate limiting |
 | File uploads | Google Drive via raw REST (no SDK); Drive failures fall back to email attachment, the entry always saves, and oversized files are flagged |
 | Lead recovery | One automated follow-up email per visitor, one-click unsubscribe honored forever |
@@ -139,6 +156,19 @@ WordPress sites pay for form-abandonment capture; Astro and static sites have ha
 | Cost | Annual per-site license | Monthly plan | Free | Free, MIT |
 
 One deliberate trade-off: this package captures and manages form data, but it doesn't generate form markup. Bring your own form; a drag-and-drop builder is the one WordPress feature it won't replace.
+
+## Hardened in production
+
+This package runs in production on a live services business. Versions 0.1.2 through 0.1.10 each shipped from a finding that surfaced there, and the fixes are in the defaults you install today:
+
+- **Payments survive edge bot-challenges.** A challenged navigation POST is structurally unrecoverable: the interstitial cannot replay the body. Only real browsers get challenged, so every curl and dev-environment test passes while production clicks die. The pay page submits over fetch (unchallengeable by design) and hops to checkout as a plain GET ([docs/payments.md](./docs/payments.md) section 3b). When a Turnstile token expires mid-payment, the page recovers itself: inline explanation, refreshed widget, re-armed button.
+
+  ![Payment page recovering from an expired security check: inline banner, refreshed Turnstile widget, re-enabled Pay button](.github/assets/pay-recovery.png)
+- **Lead history survives redeploys.** Git-deploy hosts rebuild the app directory on every release, wiping the default `data/` dir. `dbPath` is env-configurable so the SQLite file can live outside the deploy dir; the package creates the directory and keeps the admin secret beside it.
+- **Turnstile in the real world.** Test sitekeys mint short dummy tokens, so submit buttons arm on any non-empty token, never on token shape. `remoteip` is not sent to siteverify because dual-stack visitors solve on one IP family and post on the other. Every rejection carries its Cloudflare error code, so failures diagnose themselves.
+- **Notification emails carry the whole picture.** Journey trail, IP geolocation, and traffic source arrive next to the form fields, and hosts can brand every template through `templatesModule`. A branded override looks like this (fictional demo brand):
+
+  ![A fully branded abandoned-lead email produced by a custom templatesModule override](.github/assets/email-branded.png)
 
 ## Docs
 
@@ -164,7 +194,7 @@ Every abandoned entry stores the fields typed so far, the last-edited field, and
 Create a pay-link from any entry in the admin, or share `/forms-pay?amount=200` with no entry at all. The server recomputes every total, and payments are marked paid only by verified Stripe or PayPal webhooks ([docs/payments.md](./docs/payments.md)).
 
 ### Is there an open-source form backend with an admin UI for Astro?
-Yes — `/forms-admin` ships in this package: entries, abandoned leads, payments, analytics, CSV and `.db` export, enabled by a single `FORMS_ADMIN_PASSWORD` env var. Server-rendered, no client framework.
+Yes: `/forms-admin` ships in this package with entries, abandoned leads, payments, analytics, CSV and `.db` export, enabled by a single `FORMS_ADMIN_PASSWORD` env var. Server-rendered, no client framework.
 
 ### How do I add file uploads to an Astro form without a SaaS?
 Uploads land in your own Google Drive over raw REST (no SDK dependency). If Drive fails, files up to ~10MB fall back to email attachment; larger files are flagged and the entry still saves ([docs/drive.md](./docs/drive.md)).
@@ -175,4 +205,4 @@ Test and build commands, the clean-room statement, and the blocking pre-publish 
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT; see [LICENSE](./LICENSE).

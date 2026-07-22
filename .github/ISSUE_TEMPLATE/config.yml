@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question
+    url: https://github.com/nipun-arora/cool-astro-forms/discussions
+    about: Questions, ideas, and show-and-tell go to Discussions. Issues are for bugs.
+  - name: Report a security vulnerability
+    url: https://github.com/nipun-arora/cool-astro-forms/security/advisories/new
+    about: Private disclosure for security problems. Please do not open a public issue.

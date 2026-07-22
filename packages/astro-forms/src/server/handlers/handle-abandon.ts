@@ -283,14 +283,18 @@ export async function handleAbandon(
     geo = undefined;
   }
 
-  // 9. Atomic dedupe save (ABND-03)
+  // 9. Atomic dedupe save (ABND-03). The _caf transport envelope (Turnstile
+  // token) is stripped from STORED fields — mirrors record-submission.ts;
+  // token extraction below (9b) reads payload.fields, not the stored copy.
+  const storedFields = { ...payload.fields };
+  delete storedFields[CAF_FIELD_NAME];
   let result;
   try {
     result = await deps.storage.upsertAbandoned(
       {
         siteId: payload.siteId,
         formId: payload.formId,
-        fields: payload.fields,
+        fields: storedFields,
         visitorUuid,
         ip,
         userAgent: input.headers.get('User-Agent') ?? undefined,

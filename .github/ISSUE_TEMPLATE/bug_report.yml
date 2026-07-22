@@ -1,0 +1,48 @@
+name: Bug report
+description: Something broke or behaved unexpectedly
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: cool-astro-forms version
+      placeholder: "0.1.10"
+    validations:
+      required: true
+  - type: input
+    id: astro
+    attributes:
+      label: Astro version and adapter
+      placeholder: "astro 7.2.1, @astrojs/node standalone"
+    validations:
+      required: true
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Storage backend
+      options:
+        - SQLite (default)
+        - Turso / libSQL
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Where it runs
+      placeholder: "local dev / VPS / Hostinger / Vercel / Netlify / other"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead. Paste exact error messages.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest config + form + steps that show the problem. A repo link is ideal.
+    validations:
+      required: false
