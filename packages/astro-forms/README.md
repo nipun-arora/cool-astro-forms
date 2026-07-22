@@ -178,6 +178,8 @@ This package runs in production on a live services business. Versions 0.1.2 thro
 - [`docs/recovery.md`](https://github.com/nipun-arora/cool-astro-forms/blob/main/docs/recovery.md) — lead-recovery emails: consent modes, per-form scoping, unsubscribe mechanics
 - [`docs/serverless.md`](https://github.com/nipun-arora/cool-astro-forms/blob/main/docs/serverless.md) — Turso/libSQL storage, explicit secrets, cold-start-safe rate limiting
 - [`docs/gdpr.md`](https://github.com/nipun-arora/cool-astro-forms/blob/main/docs/gdpr.md) — each retention, erasure, and consent mechanic mapped to the GDPR concept it serves
+- [`docs/faq.md`](https://github.com/nipun-arora/cool-astro-forms/blob/main/docs/faq.md) — short self-contained answers: static sites, external services, payments, GDPR, production readiness
+- [`docs/comparison.md`](https://github.com/nipun-arora/cool-astro-forms/blob/main/docs/comparison.md) — the capability table as a standalone page, including when NOT to choose this package
 
 ## FAQ
 
