@@ -198,7 +198,7 @@ describe('POST /forms-admin/payments/action', () => {
       totalCents: 20000,
       currency: 'usd',
       entryId: 'e1',
-      returnUrl: 'https://example.com/',
+      returnUrl: 'https://example.com/forms-pay/success',
       cancelUrl: 'https://example.com/',
     });
     expect(attachPaymentMock).toHaveBeenCalledWith(
@@ -258,14 +258,17 @@ describe('POST /forms-admin/payments/action', () => {
     expect(res.headers.get('Location')).toBe('/forms-admin/entries/e1/');
   });
 
-  it("computes the PayPal returnUrl/cancelUrl trailingSlash-aware, never a hardcoded slashless URL (B1)", async () => {
+  it("computes the PayPal returnUrl/cancelUrl trailingSlash-aware, with the success page as returnUrl and the site root as cancelUrl (B1)", async () => {
     (config as { trailingSlash?: 'always' | 'never' | 'ignore' }).trailingSlash = 'always';
     getEntryByIdMock.mockResolvedValueOnce(makeEntry());
 
     await callPost({ entryId: 'e1', provider: 'paypal', amount: '200' });
 
     expect(createOrderMock).toHaveBeenCalledWith(
-      expect.objectContaining({ returnUrl: 'https://example.com/', cancelUrl: 'https://example.com/' }),
+      expect.objectContaining({
+        returnUrl: 'https://example.com/forms-pay/success/',
+        cancelUrl: 'https://example.com/',
+      }),
     );
   });
 
