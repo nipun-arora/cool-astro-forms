@@ -114,18 +114,16 @@ export const POST: APIRoute = async ({ request }) => {
       const result = await createPaymentLink({ amountCents, currency: DEFAULT_CURRENCY, memo, entryId });
       link = { url: result.url, providerRef: result.providerRef };
     } else if (paypalConfigured()) {
-      // No dedicated payment-confirmation page exists in this plan's scope
-      // (that lands with 03-05's /forms-pay/success) — both return/cancel
-      // land on the site root, computed trailingSlash-aware (B1). The
-      // inbound webhook (03-07) remains the sole source of payment truth,
-      // never this browser redirect.
-      const returnUrl = `${config.siteUrl}${adminUrl('/', trailingSlash)}`;
+      // PayPal's return URL now targets the shared success page, while the
+      // cancel URL keeps sending the visitor back to the site root.
+      const returnUrl = `${config.siteUrl}${adminUrl('/forms-pay/success', trailingSlash)}`;
+      const cancelUrl = `${config.siteUrl}${adminUrl('/', trailingSlash)}`;
       const order = await createOrder({
         totalCents: amountCents,
         currency: DEFAULT_CURRENCY,
         entryId,
         returnUrl,
-        cancelUrl: returnUrl,
+        cancelUrl,
       });
       if (order) link = { url: order.approvalUrl, providerRef: order.providerRef };
     }
