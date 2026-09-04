@@ -101,15 +101,27 @@ const paymentsRequestPageSchema = z
  * named-config-key discretion container for the `?fee=<key>` per-link
  * override: a host can define e.g. `{ noFee: [] }` and a payment-request
  * link can select it by name instead of only toggling the default fees on/off.
+ *
+ * `feeOverrides` decides whether that `fee` selector is honoured at all:
+ * - `'off'` (default) — any `fee` field in the request or in the page URL is
+ *   ignored; the configured `payLinkFees` always apply. The selector is read
+ *   from the POSTed body on the payment-request path, so a payer can send it
+ *   exactly as easily as an operator can put it in a link: off is the only
+ *   fail-closed default.
+ * - `'query'` — the previous behaviour: `?fee=0` waives fees entirely and
+ *   `?fee=<key>` selects a `feePresets` entry. For hosts that knowingly share
+ *   fee-free operator links and accept that a payer can also send the field.
  */
 const paymentsConfigSchema = z
   .object({
     payLinkFees: z.array(feeLineSchema).default([]),
     feePresets: z.record(z.string(), z.array(feeLineSchema)).optional(),
+    feeOverrides: z.enum(['off', 'query']).default('off'),
     requestPage: paymentsRequestPageSchema,
   })
   .default({
     payLinkFees: [],
+    feeOverrides: 'off',
     requestPage: {
       minAmountCents: DEFAULT_MIN_AMOUNT_CENTS,
       maxAmountCents: DEFAULT_MAX_AMOUNT_CENTS,

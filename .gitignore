@@ -22,3 +22,7 @@ playwright-report/
 .env
 .env.*
 .gstack/
+.DS_Store
+
+# private business research (owner-only, never committed)
+.planning/business/

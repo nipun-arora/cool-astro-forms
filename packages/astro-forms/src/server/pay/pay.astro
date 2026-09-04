@@ -258,7 +258,16 @@ const previewFeeLines = feeLines.map((line) => ({
           <input id="amount" name="amount" type="number" min="0" step="0.01" value={dollarsValue} required />
         </div>
         <input type="hidden" name="currency" value={currency} />
-        {feeParam !== null && <input type="hidden" name="fee" value={feeParam} />}
+        {
+          /* The `fee` selector only rides along when the host opted in with
+             payments.feeOverrides: 'query'. In the default 'off' mode the
+             server ignores a posted `fee` anyway, and the breakdown above
+             (also via resolveFeeLines) already shows the configured fees —
+             forwarding a dead field would only invite a payer to edit it. */
+          config.payments.feeOverrides === 'query' && feeParam !== null && (
+            <input type="hidden" name="fee" value={feeParam} />
+          )
+        }
         {labelParam && <input type="hidden" name="label" value={labelParam} />}
 
         <table class="breakdown">

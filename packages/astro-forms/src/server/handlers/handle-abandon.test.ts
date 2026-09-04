@@ -32,7 +32,11 @@ function makeConfig(abandonmentOverrides: Partial<CoolFormsConfig['forms'][strin
     dbPath: 'data/forms.db',
     geo: { enabled: true, providerUrl: 'https://ipwho.is/{ip}', timeoutMs: 3000 },
     admin: { sessionTtlDays: 7 },
-    payments: { payLinkFees: [], requestPage: { minAmountCents: 100, maxAmountCents: 1_000_000, allowedCurrencies: ['usd'] } },
+    payments: {
+      payLinkFees: [],
+      feeOverrides: 'off',
+      requestPage: { minAmountCents: 100, maxAmountCents: 1_000_000, allowedCurrencies: ['usd'] },
+    },
     webhooks: [],
     drive: { linkAccess: 'private', attachmentFallbackMaxBytes: 10_485_760, rootFolderName: 'cool-astro-forms' },
     recovery: { enabled: false, delayMins: 60, consentMode: 'auto' },

@@ -66,6 +66,37 @@ describe('parseConfig — payments subtree (Phase 3)', () => {
   });
 });
 
+/**
+ * `payments.feeOverrides` (fee-selector opt-in). The `fee` selector is read
+ * from the POSTed body on the payment-request path, so a payer can send it
+ * exactly as easily as an operator can put it in a shared link — it stays
+ * OFF until a host knowingly turns it on.
+ */
+describe('parseConfig — payments.feeOverrides (fee-selector opt-in)', () => {
+  it('defaults to "off" when the payments key is omitted entirely, so an untouched config can never have its fees waived by a request field', () => {
+    const parsed = parseConfig(baseConfig());
+    expect(parsed.payments.feeOverrides).toBe('off');
+  });
+
+  it('defaults to "off" when payments is configured WITHOUT the feeOverrides field (an upgraded config fails closed)', () => {
+    const parsed = parseConfig(
+      baseConfig({ payments: { payLinkFees: [{ label: 'Card fee', percent: 0.05 }] } }),
+    );
+    expect(parsed.payments.feeOverrides).toBe('off');
+  });
+
+  it('accepts the explicit "query" opt-in for hosts that knowingly share fee-free operator links', () => {
+    const parsed = parseConfig(baseConfig({ payments: { feeOverrides: 'query' } }));
+    expect(parsed.payments.feeOverrides).toBe('query');
+  });
+
+  it('rejects any value other than off|query — a typo must fail loud at config time, never silently land in the permissive mode', () => {
+    expect(() => parseConfig(baseConfig({ payments: { feeOverrides: 'on' } }))).toThrow();
+    expect(() => parseConfig(baseConfig({ payments: { feeOverrides: true } }))).toThrow();
+    expect(() => parseConfig(baseConfig({ payments: { feeOverrides: 'yes' } }))).toThrow();
+  });
+});
+
 describe('parseConfig — webhooks subtree (Phase 3)', () => {
   it('accepts a valid webhook target', () => {
     const parsed = parseConfig(

@@ -59,19 +59,36 @@ export function parseAmountParam(searchParams: URLSearchParams): number | undefi
 export interface FeeLineConfig {
   payLinkFees: FeeLine[];
   feePresets?: Record<string, FeeLine[]>;
+  /**
+   * `config.payments.feeOverrides`. Anything other than `'query'` — including
+   * an absent field — ignores the `fee` selector entirely (fail closed).
+   */
+  feeOverrides?: 'off' | 'query';
 }
 
 /**
- * Resolves the `FeeLine[]` to apply for a payment request per the `?fee=`
- * override (D3):
- * - `?fee=0` disables fees entirely -> `[]`.
- * - `?fee=<key>` present in `config.feePresets` -> that preset array.
- * - `?fee=<unknown-key>` -> falls back to the default `payLinkFees` (never
- *   throws — an unrecognized preset key degrades to "no override", not an
- *   error).
- * - No `?fee` param -> `config.payLinkFees` as-is.
+ * Resolves the `FeeLine[]` to apply for a payment request.
+ *
+ * The `fee` selector is HOST-OPTIONAL and off by default. Callers hand this
+ * function the same params on both paths — the pay page's query string and
+ * the POSTed request body — so the field is payer-settable, not
+ * operator-only: whoever pays can add `fee=0` to the form post just as
+ * easily as an operator can put it in a shared link.
+ *
+ * - `config.feeOverrides !== 'query'` (default, and any config that omits
+ *   the field) -> `config.payLinkFees` unconditionally, whatever `fee` says.
+ *   Fail closed: the configured fees are the price.
+ * - `config.feeOverrides === 'query'` -> the D3 selector behaviour:
+ *   - `fee=0` disables fees entirely -> `[]`.
+ *   - `fee=<key>` present in `config.feePresets` -> that preset array.
+ *   - `fee=<unknown-key>` -> falls back to the default `payLinkFees` (never
+ *     throws — an unrecognized preset key degrades to "no override", not an
+ *     error).
+ *   - No `fee` param -> `config.payLinkFees` as-is.
  */
 export function resolveFeeLines(searchParams: URLSearchParams, config: FeeLineConfig): FeeLine[] {
+  if (config.feeOverrides !== 'query') return config.payLinkFees;
+
   const fee = searchParams.get('fee');
   if (fee === null) return config.payLinkFees;
   if (fee === '0') return [];

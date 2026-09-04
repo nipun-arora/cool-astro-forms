@@ -19,7 +19,7 @@ import { createCheckoutSession } from '../../payments/stripe.js';
 import { createRateLimiter } from '../../security/rate-limit.js';
 import { contentLengthWithinCap, MAX_PAYLOAD_BYTES, readBodyCapped } from '../../security/size-cap.js';
 import { getStorageAdapter } from '../../storage/index.js';
-import { verifyTurnstile } from '../../turnstile.js';
+import { verifyTurnstile, warnTurnstileInert } from '../../turnstile.js';
 
 export const prerender = false;
 
@@ -65,6 +65,20 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
       ? (token: string | undefined, _clientIp: string) =>
           verifyTurnstile(token, { secret: turnstileSecret })
       : undefined;
+
+    // A site with neither key never wanted Turnstile, and staying quiet there
+    // is correct. A site key WITHOUT a secret is worse here than anywhere else:
+    // the pay page renders the widget, every payer solves a challenge, and this
+    // endpoint's HARD gate is switched off because verifyTurnstileDep is
+    // undefined above — so verifyTurnstile is never reached and cannot raise
+    // its own warning. It has to be raised here, once per process, from the
+    // same flag verifyTurnstile uses.
+    if (!turnstileSecret && process.env.TURNSTILE_SITE_KEY) {
+      warnTurnstileInert('routes/pay/create-session', {
+        effect:
+          'the Turnstile widget is rendering on the pay page, but payment requests are created without any token check',
+      });
+    }
 
     // PAY-04: createPaypalOrder stays undefined (module inert, no PayPal
     // branch reachable) unless both PayPal env vars are configured.

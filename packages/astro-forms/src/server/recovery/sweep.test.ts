@@ -41,6 +41,7 @@ function makeConfig(
     admin: { sessionTtlDays: 7 },
     payments: {
       payLinkFees: [],
+      feeOverrides: 'off',
       requestPage: { minAmountCents: 100, maxAmountCents: 1_000_000, allowedCurrencies: ['usd'] },
     },
     webhooks: [],

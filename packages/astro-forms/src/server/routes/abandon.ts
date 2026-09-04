@@ -20,7 +20,7 @@ import { contentLengthWithinCap, MAX_PAYLOAD_BYTES, readBodyCapped } from '../se
 import type { StorageAdapter } from '../storage/adapter.js';
 import { getStorageAdapter } from '../storage/index.js';
 import { handleAbandon } from '../handlers/handle-abandon.js';
-import { verifyTurnstile } from '../turnstile.js';
+import { verifyTurnstile, warnTurnstileInert } from '../turnstile.js';
 import { deliverWebhook } from '../webhooks/deliver.js';
 
 export const prerender = false;
@@ -91,6 +91,18 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
         // challenge on one IP family and post on another (see create-session).
         (token: string | undefined, _clientIp: string) => verifyTurnstile(token, { secret: turnstileSecret })
       : undefined;
+
+    // A site with neither key never wanted Turnstile, and staying quiet there
+    // is correct. A site key WITHOUT a secret is different: the widget is
+    // challenging every visitor and minting tokens that nothing on the server
+    // ever checks. verifyTurnstile is not reached in that state (verifyToken
+    // is undefined above), so the warning has to be raised here — once per
+    // process, from the same flag verifyTurnstile uses.
+    if (!turnstileSecret && process.env.TURNSTILE_SITE_KEY) {
+      warnTurnstileInert('routes/abandon', {
+        effect: 'the Turnstile widget is rendering, but abandonment entries are saved without any token check',
+      });
+    }
 
     // D2 fix #1 (ADPT-01): 'storage' awaits the adapter-backed persistent
     // limiter over the SAME storage adapter the handler already built;

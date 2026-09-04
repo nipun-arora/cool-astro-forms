@@ -36,6 +36,19 @@
  * measurement. Per D1 the ceiling is raised to 5376 (130B headroom, in line
  * with the earlier 94B precedent) rather than trimming the seam RCV-01
  * requires. Measured before/after: 5054 -> 5246 (+192B, capture.ts only).
+ *
+ * D1 re-applied again (Turnstile single-use token, 0.1.12): the same closure
+ * measured 5296 bytes before this change and 5377 after — one byte over the
+ * 5376 ceiling. The +81 bytes are capture.ts's token recycling: the
+ * `setTurnstileResetter` registration seam, the `recycleTurnstileToken()`
+ * clear-and-re-arm, and attemptSend's `spentToken` branch. Trimming it to
+ * save a byte would put the bug back: a token spent on an abandon send stays
+ * staged, and a visitor who moused out and came back submits with a token
+ * Cloudflare has already retired. Ceiling raised to 5504 (127B headroom, the
+ * same order as the 94B and 130B raises above). turnstile-loader.ts's own
+ * additions (widget-id registry + resetWidgets) do NOT appear in this number
+ * — that module stays excluded, as the second case below asserts.
+ * Measured before/after: 5296 -> 5377 (+81B, capture.ts only).
  */
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -48,8 +61,8 @@ const PACKAGE_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const DIST_CLIENT = path.join(PACKAGE_ROOT, 'dist/client');
 const ENTRY_FILES = ['capture.js', 'journey.js'].map((f) => path.join(DIST_CLIENT, f));
 
-/** D1-sanctioned raise: 4096 -> 5120 (02-04/ANLY-01) -> 5376 (04-07/RCV-01); see this file's own docstring for the measured rationale. */
-const GZIP_BUDGET_BYTES = 5376;
+/** D1-sanctioned raise: 4096 -> 5120 (02-04/ANLY-01) -> 5376 (04-07/RCV-01) -> 5504 (Turnstile token recycling); see this file's own docstring for the measured rationale. */
+const GZIP_BUDGET_BYTES = 5504;
 
 /** Matches both `export {...} from './x.js'` and bare `import './x.js'` — the only two import shapes tsup's ESM output emits for local chunk references. */
 const LOCAL_IMPORT_RE = /(?:from|import)\s+['"](\.[^'"]+\.js)['"]/g;

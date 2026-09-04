@@ -15,11 +15,17 @@
  * `_caf`-envelope parsing convention lets a host's submit endpoint read the
  * same token for a real-submission verifyTurnstile() call.
  *
+ * Each rendered widget's id is retained so `resetWidgets()` can re-arm them
+ * after capture.ts has spent a token on an abandon send (a Turnstile token
+ * is single-use). That function is handed to capture.ts through
+ * `setTurnstileResetter()`; capture.ts never imports this module, so the
+ * dependency direction stays one-way.
+ *
  * Written fresh against Cloudflare's documented explicit-rendering API
  * (developers.cloudflare.com/turnstile) — clean-room, not derived from any
  * commercial form-plugin source.
  */
-import { setTurnstileToken } from './capture.js';
+import { setTurnstileResetter, setTurnstileToken } from './capture.js';
 
 interface TurnstileRenderOptions {
   sitekey: string;
@@ -32,6 +38,8 @@ declare global {
   interface Window {
     turnstile?: {
       render: (container: string | HTMLElement, options: TurnstileRenderOptions) => string;
+      /** Re-arms a widget so it issues a fresh token. Added to the global by api.js. */
+      reset?: (widget?: string | HTMLElement) => void;
     };
   }
 }
@@ -40,6 +48,40 @@ const SCRIPT_SRC = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
 const SCRIPT_MARKER_ATTR = 'data-caf-turnstile-script';
 const WIDGET_MARKER_ATTR = 'data-caf-turnstile';
 const ONLOAD_CALLBACK_NAME = '__cafTurnstileOnload';
+
+/**
+ * Ids of the widgets this module rendered, in render order. Cloudflare's
+ * `reset()` takes a widget id and, with no argument, only touches the first
+ * widget on the page — a site with a widget per form needs every id.
+ */
+const widgetIds: string[] = [];
+
+/**
+ * Re-arms every widget this module rendered, so each issues a fresh token
+ * after capture.ts spent the last one on an abandon send. Safe to call on a
+ * page whose widgets have not loaded (or an api.js build without `reset`):
+ * it simply does nothing. Individual failures are swallowed so one broken
+ * widget cannot stop the rest from re-arming.
+ *
+ * Exported for tests and for a host that wants to re-arm by hand; the normal
+ * caller is capture.ts via the resetter registered below.
+ */
+export function resetWidgets(): void {
+  const reset = window.turnstile?.reset;
+  if (!reset) return;
+  for (const id of widgetIds) {
+    try {
+      reset(id);
+    } catch {
+      // one uncooperative widget must not strand the others
+    }
+  }
+}
+
+/** Test-only: forgets the rendered widgets so cases do not inherit each other's. */
+export function resetWidgetRegistry(): void {
+  widgetIds.length = 0;
+}
 
 /**
  * Renders one Turnstile widget per `[data-caf]` form that doesn't already
@@ -66,13 +108,20 @@ export function renderWidgets(sitekey: string): void {
       form.appendChild(container);
     }
 
-    turnstile.render(container, {
+    const widgetId = turnstile.render(container, {
       sitekey,
       callback: setTurnstileToken,
       // Pinned (documented default): re-arm in place when the ~300s token
-      // dies, and re-fire callback so the staged token stays fresh.
+      // dies, and re-fire callback so the staged token stays fresh. Orthogonal
+      // to the explicit reset() below — that one handles a token this page
+      // SPENT, not one that timed out.
       'refresh-expired': 'auto',
     });
+
+    // Registering only after a real render is what keeps a keys-absent or
+    // form-less page from ever handing capture.ts a resetter to call.
+    if (typeof widgetId === 'string' && widgetId !== '') widgetIds.push(widgetId);
+    setTurnstileResetter(resetWidgets);
   });
 }
 

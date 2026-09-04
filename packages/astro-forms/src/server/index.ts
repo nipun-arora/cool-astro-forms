@@ -29,7 +29,7 @@ export type { Entry, EntryStatus, JourneyStep, WebhookEventType, WebhookTarget }
 export type { FileInput, FileRecord, FileUploadOutcome } from '../types.js';
 
 export { verifyTurnstile } from './turnstile.js';
-export type { VerifyTurnstileOptions, VerifyTurnstileResult } from './turnstile.js';
+export type { VerifyTurnstileOptions, VerifyTurnstileOutcome, VerifyTurnstileResult } from './turnstile.js';
 
 /**
  * Receiver-side helper (HOOK-01): a host's own n8n/Astro receiver imports

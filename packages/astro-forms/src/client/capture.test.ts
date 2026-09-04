@@ -8,6 +8,7 @@ import {
   init,
   readHoneypot,
   setRecoveryConsent,
+  setTurnstileResetter,
   setTurnstileToken,
   shouldSend,
   stageFields,
@@ -484,6 +485,147 @@ describe('setTurnstileToken() — abandon payload _caf envelope attach (D3/BOT-0
     expect(JSON.parse(payload.fields[CAF_FIELD_NAME] as string)).toEqual({ turnstileToken: 'minted-abc123' });
     // stageFields-collected fields are untouched — only the _caf key is added.
     expect(payload.fields.email).toBe('with-token@example.com');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Spending the token, then re-arming. A Turnstile token works once: the
+// abandon route redeems it at siteverify when it first creates a row. Before
+// this, the same token stayed staged in the module, so a visitor who moused
+// out and came back handed their host's own submit endpoint a token
+// Cloudflare had already retired — a real person answered with
+// `timeout-or-duplicate`. The send now drops the token and asks the widget to
+// re-arm, which is also what refills the widget's own hidden
+// cf-turnstile-response input that a native form POST reads.
+// ---------------------------------------------------------------------------
+
+describe('Turnstile token recycling after an abandon send (single-use token)', () => {
+  afterEach(() => {
+    window.caf?.submitted();
+    document.body.innerHTML = '';
+    delete (window as unknown as { __cafConfig?: unknown }).__cafConfig;
+    setTurnstileToken('');
+    setTurnstileResetter(() => {});
+  });
+
+  /** Collects EVERY beacon body sent, not just the last — a batch sends one per bound form. */
+  function captureSentBodies(): { getBodies: () => Promise<string[]> } {
+    const sent: (Blob | string)[] = [];
+    Object.defineProperty(navigator, 'sendBeacon', {
+      value: (_url: string, body: Blob | string) => {
+        sent.push(body);
+        return true;
+      },
+      configurable: true,
+    });
+    return {
+      getBodies: async () => Promise.all(sent.map(async (b) => (typeof b === 'string' ? b : await b.text()))),
+    };
+  }
+
+  function tokenOf(body: string): string | undefined {
+    const payload = JSON.parse(body) as { fields: Record<string, unknown> };
+    const envelope = payload.fields[CAF_FIELD_NAME];
+    return envelope ? (JSON.parse(envelope as string) as { turnstileToken?: string }).turnstileToken : undefined;
+  }
+
+  function formIdOf(body: string): string {
+    return (JSON.parse(body) as { formId: string }).formId;
+  }
+
+  it('asks the widget to re-arm after a send that carried the token', () => {
+    const form = buildForm(`<input name="email" value="recycle@example.com" />`);
+    form.setAttribute('data-caf', 'form-recycle-reset');
+    window.__cafConfig = { siteId: 'site-1' };
+    init();
+
+    const resetSpy = vi.fn();
+    setTurnstileResetter(resetSpy);
+    setTurnstileToken('token-to-spend');
+    captureSentBodies();
+
+    document.dispatchEvent(new MouseEvent('mouseleave', { clientY: 0 }));
+
+    expect(resetSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('never touches the widget on a send that carried no token — a page whose visitor never solved the challenge has nothing to re-arm', () => {
+    const form = buildForm(`<input name="email" value="no-token@example.com" />`);
+    form.setAttribute('data-caf', 'form-recycle-notoken');
+    window.__cafConfig = { siteId: 'site-1' };
+    init();
+
+    const resetSpy = vi.fn();
+    setTurnstileResetter(resetSpy);
+    captureSentBodies();
+
+    document.dispatchEvent(new MouseEvent('mouseleave', { clientY: 0 }));
+
+    expect(resetSpy).not.toHaveBeenCalled();
+  });
+
+  it('drops the token the moment it is spent, so no later send can replay it — a replayed token is what Cloudflare answers with timeout-or-duplicate', async () => {
+    const formA = buildForm(`<input name="email" value="a@example.com" />`);
+    formA.setAttribute('data-caf', 'form-recycle-a');
+    const formB = buildForm(`<input name="email" value="b@example.com" />`);
+    formB.setAttribute('data-caf', 'form-recycle-b');
+    window.__cafConfig = { siteId: 'site-1' };
+    init();
+
+    setTurnstileToken('single-use-token');
+    const { getBodies } = captureSentBodies();
+
+    document.dispatchEvent(new MouseEvent('mouseleave', { clientY: 0 }));
+
+    const bodies = (await getBodies()).filter((b) => formIdOf(b).startsWith('form-recycle-'));
+    expect(bodies).toHaveLength(2);
+    expect(bodies.filter((b) => tokenOf(b) === 'single-use-token')).toHaveLength(1);
+    expect(bodies.filter((b) => tokenOf(b) === undefined)).toHaveLength(1);
+  });
+
+  it('picks up the fresh token once the widget re-solves', () => {
+    const form = buildForm(`<input name="email" value="resolve@example.com" />`);
+    form.setAttribute('data-caf', 'form-recycle-resolve');
+    window.__cafConfig = { siteId: 'site-1' };
+    init();
+
+    // The real widget calls setTurnstileToken again from its own callback
+    // when reset() makes it re-solve.
+    setTurnstileResetter(() => setTurnstileToken('fresh-token'));
+    setTurnstileToken('spent-token');
+    const { getBodies } = captureSentBodies();
+
+    document.dispatchEvent(new MouseEvent('mouseleave', { clientY: 0 }));
+
+    const form2 = buildForm(`<input name="email" value="second@example.com" />`);
+    form2.setAttribute('data-caf', 'form-recycle-resolve-2');
+    init();
+    document.dispatchEvent(new MouseEvent('mouseleave', { clientY: 0 }));
+
+    return getBodies().then((all) => {
+      const second = all.find((b) => formIdOf(b) === 'form-recycle-resolve-2');
+      expect(second).toBeDefined();
+      expect(tokenOf(second!)).toBe('fresh-token');
+    });
+  });
+
+  it('still delivers the abandon payload when the widget refuses to reset — losing the lead would be a worse failure than a stale challenge', async () => {
+    const form = buildForm(`<input name="email" value="throwing@example.com" />`);
+    form.setAttribute('data-caf', 'form-recycle-throws');
+    window.__cafConfig = { siteId: 'site-1' };
+    init();
+
+    setTurnstileResetter(() => {
+      throw new Error('widget is gone');
+    });
+    setTurnstileToken('token-to-spend');
+    const { getBodies } = captureSentBodies();
+
+    expect(() => document.dispatchEvent(new MouseEvent('mouseleave', { clientY: 0 }))).not.toThrow();
+
+    const bodies = (await getBodies()).filter((b) => formIdOf(b) === 'form-recycle-throws');
+    expect(bodies).toHaveLength(1);
+    expect(tokenOf(bodies[0]!)).toBe('token-to-spend');
   });
 });
 

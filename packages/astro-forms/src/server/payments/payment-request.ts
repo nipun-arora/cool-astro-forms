@@ -16,8 +16,17 @@
  * slash rule (imported read-only from `admin/_shared.js` — no file
  * modification, no wave-3 conflict) and hands them to the injected
  * `createCheckoutSession`/`createPaypalOrder` deps, which assign them
- * verbatim (T-03-21). Never trusts a client-sent total/fee — there is no
- * such field anywhere in this module's request-parsing surface (T-03-18).
+ * verbatim (T-03-21).
+ *
+ * Prices are never client-stated (T-03-18): no total, and no fee AMOUNT, is
+ * read anywhere in this module's request-parsing surface — the breakdown is
+ * always recomputed server-side from the posted base amount and the
+ * host-configured fee lines. The one fee-related field that IS read, `fee`,
+ * is a SELECTOR over those host-configured lines, and it is honoured only
+ * when the host opts in with `payments.feeOverrides: 'query'`. In the default
+ * `'off'` mode a posted `fee` changes nothing (it is logged as
+ * `payment-request.fee-override-ignored`, never rejected) — the configured
+ * `payLinkFees` are charged.
  *
  * Clean-room: written fresh against 03-CONTEXT.md's D1-D4 decisions and
  * 03-RESEARCH.md's system diagram, not derived from any commercial form-plugin/legacy
@@ -198,9 +207,10 @@ export async function handlePaymentRequest(
   const requestPage = deps.config.payments.requestPage;
   const currency = (params.get('currency') ?? requestPage.allowedCurrencies[0] ?? 'usd').toLowerCase();
 
-  // 5. Validate — REJECT, never clamp (D4). There is no totalCents/feeCents
-  // field anywhere in this parsing surface for a client to lie about
-  // (T-03-18/T-03-19).
+  // 5. Validate — REJECT, never clamp (D4). No totalCents/feeCents field is
+  // read anywhere in this parsing surface, so a client can never state a
+  // price (T-03-18/T-03-19); the only fee-related field it may post is the
+  // `fee` SELECTOR handled in step 7.
   const validation = validatePaymentRequest({ baseAmountCents, currency }, requestPage);
   if (!validation.ok) {
     return reject(deps, 400, validation.reason, { ip });
@@ -268,7 +278,17 @@ export async function handlePaymentRequest(
   }
 
   // 7. Server-side fee breakdown (D3) — always recomputed from the base
-  // amount, never trusts any client-sent total/fee value.
+  // amount and the host-configured fee lines; no client-sent total or fee
+  // AMOUNT is ever read. The posted `fee` SELECTOR picks between those
+  // host-configured lines, and only when the host opted in with
+  // `payments.feeOverrides: 'query'` — otherwise resolveFeeLines returns the
+  // configured `payLinkFees` regardless of what the body says.
+  if (params.get('fee') !== null && deps.config.payments.feeOverrides !== 'query') {
+    // Not a reject and not a different status: the configured fees are simply
+    // charged. Logged so a host can see the attempts — a payer probing the
+    // selector, or a pre-upgrade operator link that no longer waives fees.
+    deps.log('payment-request.fee-override-ignored', { ip });
+  }
   const feeLines = resolveFeeLines(params, deps.config.payments);
   const breakdown = computeBreakdown(amountCents, feeLines);
 

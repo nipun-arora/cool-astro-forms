@@ -30,13 +30,57 @@ const DEFAULT_DENY_PATTERN = /csrf|token|card|cvv|ssn|password/i;
 // callback once a token is minted; read by attemptSend() below. Stays
 // undefined on a keys-absent site (the loader never runs), which is what
 // keeps abandon payloads byte-identical to Phase 1 in that case.
+//
+// A Turnstile token can be spent exactly once. Sending it on an abandon
+// payload spends it: the abandon route verifies at siteverify when it first
+// creates a row, and Cloudflare retires the token there. Without the reset
+// below, a visitor who moused out of the page (or switched tabs, or clicked
+// an outbound link) and then came back and submitted would hand the host's
+// own endpoint a dead token and be refused with `timeout-or-duplicate` — a
+// real person, treated as a replay attack.
+//
+// So a send that carried a token drops it and asks the widget to re-arm.
+// The clear is synchronous and happens before transmit returns, so a submit
+// racing the re-mint can never pick the spent token back up; the re-solve
+// then repopulates both this holder and the widget's own hidden
+// `cf-turnstile-response` input, which is what a host's native form POST
+// reads. The reset is fire-and-forget by necessity — an abandon send on
+// beforeunload has no response to wait for.
+//
+// This is not a complete fix and is not documented as one: the re-mint takes
+// a moment, and a managed-mode widget may need another interaction. A host
+// endpoint still has to treat ONE `timeout-or-duplicate` as recoverable and
+// retry after a reset (see server/turnstile.ts's header).
 // ---------------------------------------------------------------------------
 
 let currentTurnstileToken: string | undefined;
+let resetTurnstileWidgets: (() => void) | undefined;
 
 /** Called by turnstile-loader.ts's widget callback when a token is minted. */
 export function setTurnstileToken(token: string): void {
   currentTurnstileToken = token || undefined;
+}
+
+/**
+ * Registered by turnstile-loader.ts once it has rendered at least one widget.
+ * Stays undefined on a page with no widget (keys absent, or no `[data-caf]`
+ * form), so the reset below is a no-op there rather than a guard every
+ * caller has to repeat. Inverted this way round because turnstile-loader
+ * already imports capture, not the other way about.
+ */
+export function setTurnstileResetter(reset: () => void): void {
+  resetTurnstileWidgets = reset;
+}
+
+/** Drops the spent token and re-arms the widget. Never throws into a send. */
+function recycleTurnstileToken(): void {
+  currentTurnstileToken = undefined;
+  try {
+    resetTurnstileWidgets?.();
+  } catch {
+    // A widget that refuses to reset is not a reason to lose the abandon
+    // send that just went out; the host's retry-once contract covers it.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -420,8 +464,9 @@ function attemptSend(state: FormCaptureState, now: number): void {
   // D3/BOT-01: attach the minted Turnstile token into the payload's _caf
   // envelope ONLY when one exists — a keys-absent site never calls
   // setTurnstileToken(), so `fields` here stays byte-identical to `state.fields`.
-  const fields = currentTurnstileToken
-    ? { ...state.fields, [CAF_FIELD_NAME]: JSON.stringify({ turnstileToken: currentTurnstileToken }) }
+  const spentToken = currentTurnstileToken;
+  const fields = spentToken
+    ? { ...state.fields, [CAF_FIELD_NAME]: JSON.stringify({ turnstileToken: spentToken }) }
     : state.fields;
 
   const payload = buildAbandonPayload({
@@ -447,6 +492,13 @@ function attemptSend(state: FormCaptureState, now: number): void {
   } else {
     transmit(payload);
   }
+
+  // The token is on its way to the server, which will spend it. Drop it and
+  // re-arm now, not on the response — sendBeacon has none, and a beforeunload
+  // send never gets to read one. sendAllForms() loops over every bound form,
+  // and the clear is what stops a second form in the same batch from posting
+  // the same already-spent token.
+  if (spentToken) recycleTurnstileToken();
 }
 
 function sendAllForms(): void {

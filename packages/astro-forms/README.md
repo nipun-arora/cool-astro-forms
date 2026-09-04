@@ -165,7 +165,7 @@ This package runs in production on a live services business. Versions 0.1.2 thro
 
   ![Payment page recovering from an expired security check: inline banner, refreshed Turnstile widget, re-enabled Pay button](https://raw.githubusercontent.com/nipun-arora/cool-astro-forms/main/.github/assets/pay-recovery.png)
 - **Lead history survives redeploys.** Git-deploy hosts rebuild the app directory on every release, wiping the default `data/` dir. `dbPath` is env-configurable so the SQLite file can live outside the deploy dir; the package creates the directory and keeps the admin secret beside it.
-- **Turnstile in the real world.** Test sitekeys mint short dummy tokens, so submit buttons arm on any non-empty token, never on token shape. `remoteip` is not sent to siteverify because dual-stack visitors solve on one IP family and post on the other. Every rejection carries its Cloudflare error code, so failures diagnose themselves.
+- **Turnstile in the real world.** Test sitekeys mint short dummy tokens, so submit buttons arm on any non-empty token, never on token shape. `remoteip` is not sent to siteverify because dual-stack visitors solve on one IP family and post on the other. Every rejection carries its Cloudflare error code, so failures diagnose themselves. A token works once and the abandonment capture spends it, so the client re-arms the widget after every send that carried one, and a host gating its own submit endpoint should still retry once on `timeout-or-duplicate` rather than refuse a real person. `verifyTurnstile` reports `verified` / `rejected` / `skipped` / `unreachable`, so "nothing was checked" never looks like "the visitor failed" — and a missing secret key warns once per process instead of running an inert gate in silence.
 - **Notification emails carry the whole picture.** Journey trail, IP geolocation, and traffic source arrive next to the form fields, and hosts can brand every template through `templatesModule`. A branded override looks like this (fictional demo brand):
 
   ![A fully branded abandoned-lead email produced by a custom templatesModule override](https://raw.githubusercontent.com/nipun-arora/cool-astro-forms/main/.github/assets/email-branded.png)
@@ -180,6 +180,7 @@ This package runs in production on a live services business. Versions 0.1.2 thro
 - [`docs/gdpr.md`](https://github.com/nipun-arora/cool-astro-forms/blob/main/docs/gdpr.md) — each retention, erasure, and consent mechanic mapped to the GDPR concept it serves
 - [`docs/faq.md`](https://github.com/nipun-arora/cool-astro-forms/blob/main/docs/faq.md) — short self-contained answers: static sites, external services, payments, GDPR, production readiness
 - [`docs/comparison.md`](https://github.com/nipun-arora/cool-astro-forms/blob/main/docs/comparison.md) — the capability table as a standalone page, including when NOT to choose this package
+- [`CHANGELOG.md`](https://github.com/nipun-arora/cool-astro-forms/blob/main/CHANGELOG.md) — release notes; 0.1.12 changes a default (`payments.feeOverrides`), read before upgrading
 
 ## FAQ
 

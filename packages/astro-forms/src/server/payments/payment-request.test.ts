@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { FeeBreakdownLine } from '../../types.js';
+import type { FeeBreakdownLine, FeeLine } from '../../types.js';
 import type { RateLimiter } from '../security/rate-limit.js';
 import type { StorageAdapter } from '../storage/adapter.js';
 import {
@@ -26,6 +26,7 @@ function makeConfig(overrides: Partial<ConfigWithTrailingSlash> = {}): ConfigWit
     admin: { sessionTtlDays: 7 },
     payments: {
       payLinkFees: [{ label: 'Card fee', percent: 0.03 }],
+      feeOverrides: 'off',
       requestPage: { minAmountCents: 100, maxAmountCents: 1_000_000, allowedCurrencies: ['usd'] },
     },
     webhooks: [],
@@ -400,6 +401,86 @@ describe('handlePaymentRequest — happy path (Stripe)', () => {
       'entry-1',
       expect.objectContaining({ amountCents: 10300 }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fee selector (payments.feeOverrides). The `fee` field is read from the
+// POSTED body, so a payer can send it exactly as easily as an operator can
+// put it in a shared link — it is honoured only under the host's explicit
+// 'query' opt-in, and an ignored attempt is logged rather than rejected.
+// ---------------------------------------------------------------------------
+
+describe('handlePaymentRequest — fee selector opt-in (payments.feeOverrides)', () => {
+  function configWithFeeOverrides(
+    feeOverrides: 'off' | 'query',
+    feePresets?: Record<string, FeeLine[]>,
+  ): ConfigWithTrailingSlash {
+    const base = makeConfig();
+    return {
+      ...base,
+      payments: { ...base.payments, feeOverrides, ...(feePresets ? { feePresets } : {}) },
+    };
+  }
+
+  function loggedEvents(deps: HandlePaymentRequestDeps): unknown[] {
+    return (deps.log as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0]);
+  }
+
+  it('default config: a payer-posted fee=0 cannot waive the configured fee — the 3% line is still charged and the ignored override is logged', async () => {
+    const deps = makeDeps();
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd&fee=0' }), deps);
+
+    expect(result.status).toBe(302);
+    expect(deps.createCheckoutSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseAmountCents: 10000,
+        feeLines: [{ label: 'Card fee', amountCents: 300 }] satisfies FeeBreakdownLine[],
+      }),
+    );
+    expect(deps.storage.attachPayment).toHaveBeenCalledWith(
+      'entry-1',
+      expect.objectContaining({ amountCents: 10300 }),
+    );
+    expect(deps.log).toHaveBeenCalledWith('payment-request.fee-override-ignored', { ip: '203.0.113.5' });
+  });
+
+  it("feeOverrides: 'query' + fee=0 -> the host opted in, so fees are waived and the total equals the base amount", async () => {
+    const deps = makeDeps({ config: configWithFeeOverrides('query') });
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd&fee=0' }), deps);
+
+    expect(result.status).toBe(302);
+    expect(deps.createCheckoutSession).toHaveBeenCalledWith(
+      expect.objectContaining({ baseAmountCents: 10000, feeLines: [] }),
+    );
+    expect(deps.storage.attachPayment).toHaveBeenCalledWith(
+      'entry-1',
+      expect.objectContaining({ amountCents: 10000 }),
+    );
+    expect(loggedEvents(deps)).not.toContain('payment-request.fee-override-ignored');
+  });
+
+  it("feeOverrides: 'query' + fee=<preset key> -> that preset's fee lines are charged", async () => {
+    const deps = makeDeps({
+      config: configWithFeeOverrides('query', { flat: [{ label: 'Flat fee', flatCents: 250 }] }),
+    });
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd&fee=flat' }), deps);
+
+    expect(result.status).toBe(302);
+    expect(deps.createCheckoutSession).toHaveBeenCalledWith(
+      expect.objectContaining({ feeLines: [{ label: 'Flat fee', amountCents: 250 }] }),
+    );
+    expect(deps.storage.attachPayment).toHaveBeenCalledWith(
+      'entry-1',
+      expect.objectContaining({ amountCents: 10250 }),
+    );
+  });
+
+  it('a request with NO fee field never logs the ignored-override event — the log means "someone tried", not "every payment"', async () => {
+    const deps = makeDeps();
+    await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd' }), deps);
+
+    expect(loggedEvents(deps)).not.toContain('payment-request.fee-override-ignored');
   });
 });
 

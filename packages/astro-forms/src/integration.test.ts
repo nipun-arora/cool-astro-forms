@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import coolForms from './integration.js';
 
 // ---------------------------------------------------------------------------
@@ -230,13 +230,28 @@ describe('coolForms', () => {
   describe('Turnstile (D3/BOT-01) — env-gated conditional injection', () => {
     const ORIGINAL_SITE_KEY = process.env.TURNSTILE_SITE_KEY;
     const ORIGINAL_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY;
+    let warnLines: string[] = [];
+
+    beforeEach(() => {
+      warnLines = [];
+      vi.spyOn(console, 'warn').mockImplementation((line: unknown) => {
+        warnLines.push(String(line));
+      });
+    });
 
     afterEach(() => {
+      vi.restoreAllMocks();
       if (ORIGINAL_SITE_KEY === undefined) delete process.env.TURNSTILE_SITE_KEY;
       else process.env.TURNSTILE_SITE_KEY = ORIGINAL_SITE_KEY;
       if (ORIGINAL_SECRET_KEY === undefined) delete process.env.TURNSTILE_SECRET_KEY;
       else process.env.TURNSTILE_SECRET_KEY = ORIGINAL_SECRET_KEY;
     });
+
+    /** The one `turnstile.inert` record this build emitted, or undefined. */
+    function inertWarning(): Record<string, unknown> | undefined {
+      const line = warnLines.find((l) => l.includes('turnstile.inert'));
+      return line ? (JSON.parse(line) as Record<string, unknown>) : undefined;
+    }
 
     function loaderInjected(injectScript: ReturnType<typeof vi.fn>): boolean {
       return injectScript.mock.calls.some(
@@ -286,6 +301,44 @@ describe('coolForms', () => {
       const { injectScript } = runSetupHook();
       const [, content] = injectScript.mock.calls.find(([stage]) => stage === 'head-inline')!;
       expect(content).not.toContain('super-secret-value');
+    });
+
+    // A half-configured build is the case that used to pass in silence: the
+    // host sets one key, ships, and finds out from Cloudflare's dashboard
+    // that siteverify was never called. The build has to say so.
+    it('warns at build time when only TURNSTILE_SITE_KEY is set, naming TURNSTILE_SECRET_KEY as the missing one', () => {
+      process.env.TURNSTILE_SITE_KEY = '1x00000000000000000000AA';
+      delete process.env.TURNSTILE_SECRET_KEY;
+      runSetupHook();
+
+      const record = inertWarning();
+      expect(record).toBeDefined();
+      expect(record!.missingConfig).toBe('TURNSTILE_SECRET_KEY');
+      expect(record!.where).toBe('integration');
+    });
+
+    it('warns at build time when only TURNSTILE_SECRET_KEY is set, naming TURNSTILE_SITE_KEY as the missing one', () => {
+      delete process.env.TURNSTILE_SITE_KEY;
+      process.env.TURNSTILE_SECRET_KEY = '1x0000000000000000000000000000000AA';
+      runSetupHook();
+
+      expect(inertWarning()?.missingConfig).toBe('TURNSTILE_SITE_KEY');
+    });
+
+    it('stays silent when both keys are set — a working gate has nothing to report', () => {
+      process.env.TURNSTILE_SITE_KEY = '1x00000000000000000000AA';
+      process.env.TURNSTILE_SECRET_KEY = '1x0000000000000000000000000000000AA';
+      runSetupHook();
+
+      expect(inertWarning()).toBeUndefined();
+    });
+
+    it('stays silent when neither key is set — Turnstile off is a choice, not a misconfiguration', () => {
+      delete process.env.TURNSTILE_SITE_KEY;
+      delete process.env.TURNSTILE_SECRET_KEY;
+      runSetupHook();
+
+      expect(inertWarning()).toBeUndefined();
     });
   });
 

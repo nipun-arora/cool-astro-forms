@@ -168,8 +168,10 @@ test.describe('PAY-05 create-session — Turnstile hard gate (PAY_FAIL_URL, ALWA
     });
 
     expect(res.status()).toBe(403);
-    const body = (await res.json()) as { ok: boolean; reason?: string };
-    expect(body).toEqual({ ok: false, reason: 'turnstile' });
+    const body = (await res.json()) as { ok: boolean; reason?: string; code?: string };
+    // Since 0.1.9 the short-circuit names Cloudflare's own code for an absent
+    // token, and since 0.1.10 fetch-shaped JSON rejects carry it too.
+    expect(body).toEqual({ ok: false, reason: 'turnstile', code: 'missing-input-response' });
     expect(stripeMockHits).toBe(hitsBefore); // never reached the provider boundary
   });
 });

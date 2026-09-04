@@ -11,6 +11,7 @@ import type { AstroIntegration } from 'astro';
 import type { Plugin } from 'vite';
 import type { CafClientConfig } from './client/journey.js';
 import { parseConfig, type CoolFormsConfig } from './config.js';
+import { warn } from './server/log.js';
 import { recoveryDisabledFormIds } from './server/recovery/resolve.js';
 
 const VIRTUAL_CONFIG_ID = 'virtual:cool-astro-forms/config';
@@ -222,9 +223,22 @@ export default function coolForms(userConfig: unknown): AstroIntegration {
         // other leaves the module fully inert (byte-identical to Phase 1).
         // TURNSTILE_SECRET_KEY is read here ONLY to gate this boolean; the
         // actual secret is read again, server-side only, in routes/abandon.ts.
-        const turnstileActive = Boolean(process.env.TURNSTILE_SITE_KEY) && Boolean(process.env.TURNSTILE_SECRET_KEY);
+        const hasSiteKey = Boolean(process.env.TURNSTILE_SITE_KEY);
+        const hasSecretKey = Boolean(process.env.TURNSTILE_SECRET_KEY);
+        const turnstileActive = hasSiteKey && hasSecretKey;
         if (turnstileActive) {
           injectScript('page', 'import "cool-astro-forms/client/turnstile-loader.js";');
+        } else if (hasSiteKey || hasSecretKey) {
+          // Half-configured is the state that used to fail silently: the host
+          // set one key, believes bot protection is on, and gets a build with
+          // no widget and no verification. Neither key set is a deliberate
+          // "off" and stays quiet. This hook runs once per build, so this is
+          // one line per build, not per page.
+          warn('turnstile.inert', {
+            where: 'integration',
+            missingConfig: hasSiteKey ? 'TURNSTILE_SECRET_KEY' : 'TURNSTILE_SITE_KEY',
+            effect: 'Turnstile needs both keys — no widget was injected and no token will be verified',
+          });
         }
 
         // PAY-04: every payment route/page is env-gated the same way as

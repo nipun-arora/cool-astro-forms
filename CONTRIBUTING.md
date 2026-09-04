@@ -76,10 +76,13 @@ run, the following must all be true:
    sensitive surfaces this package ships: payment/webhook HMAC verification
    (Stripe/PayPal), the public unsubscribe/recovery route, Google Drive
    OAuth, and admin-session auth. Do not publish without it.
-3. `.github/workflows/publish.yml` is dispatched by hand (`workflow_dispatch`
+3. `CHANGELOG.md` carries an entry for the version being published, and the
+   "Unpublished at the time of writing" line under that entry is removed —
+   the changelog is what a host reads before upgrading, so it ships current.
+4. `.github/workflows/publish.yml` is dispatched by hand (`workflow_dispatch`
    with the `confirm: publish` input) by a maintainer who has personally
-   confirmed steps 1 and 2 — never automated, never triggered by a push.
-4. The `repository`, `homepage`, and `bugs` URLs in `package.json` point at
+   confirmed steps 1-3 — never automated, never triggered by a push.
+5. The `repository`, `homepage`, and `bugs` URLs in `package.json` point at
    the canonical repository (`github.com/nipun-arora/cool-astro-forms`).
 
 ## No AI-attribution policy

@@ -114,37 +114,75 @@ describe('AMOUNT_DOLLARS_PATTERN / PAY_CENTS_PATTERN — pinned grammar intent',
   });
 });
 
-describe('resolveFeeLines — ?fee= override (D3)', () => {
+// Fails if resolveFeeLines honours the `fee` selector without the host's
+// explicit `feeOverrides: 'query'` opt-in — the selector rides in the POSTed
+// body on the payment-request path, so a payer can send it as easily as an
+// operator can put it in a link. Default/absent mode must charge the
+// configured payLinkFees whatever the request says.
+describe("resolveFeeLines — fee selector IGNORED in the default 'off' mode", () => {
   const payLinkFees: FeeLine[] = [{ label: 'Processing fee', percent: 0.03 }];
   const feePresets: Record<string, FeeLine[]> = {
     noFee: [],
     creditCard: [{ label: 'Card fee', flatCents: 50 }],
   };
 
+  it('fee=0 -> configured payLinkFees (a payer cannot waive the fee)', () => {
+    expect(resolveFeeLines(qs({ fee: '0' }), { payLinkFees, feePresets, feeOverrides: 'off' })).toBe(
+      payLinkFees,
+    );
+  });
+
+  it('fee=<known preset key> -> configured payLinkFees (a payer cannot select a cheaper preset)', () => {
+    expect(
+      resolveFeeLines(qs({ fee: 'creditCard' }), { payLinkFees, feePresets, feeOverrides: 'off' }),
+    ).toBe(payLinkFees);
+  });
+
+  it('a config with NO feeOverrides field at all behaves as off (fail closed, never as query)', () => {
+    expect(resolveFeeLines(qs({ fee: '0' }), { payLinkFees, feePresets })).toBe(payLinkFees);
+    expect(resolveFeeLines(qs({ fee: 'noFee' }), { payLinkFees, feePresets })).toBe(payLinkFees);
+  });
+
+  it('no fee param -> default payLinkFees', () => {
+    expect(resolveFeeLines(qs({}), { payLinkFees, feePresets, feeOverrides: 'off' })).toBe(payLinkFees);
+  });
+});
+
+// Fails if the 'query' opt-in stops honouring the selector — a host that
+// explicitly turned it on keeps the documented D3 behaviour (?fee=0 waives,
+// ?fee=<key> picks a preset, unknown key degrades to the default).
+describe("resolveFeeLines — ?fee= override (D3), honoured under feeOverrides: 'query'", () => {
+  const payLinkFees: FeeLine[] = [{ label: 'Processing fee', percent: 0.03 }];
+  const feePresets: Record<string, FeeLine[]> = {
+    noFee: [],
+    creditCard: [{ label: 'Card fee', flatCents: 50 }],
+  };
+  const feeOverrides = 'query' as const;
+
   it('no ?fee param -> default payLinkFees', () => {
-    expect(resolveFeeLines(qs({}), { payLinkFees, feePresets })).toBe(payLinkFees);
+    expect(resolveFeeLines(qs({}), { payLinkFees, feePresets, feeOverrides })).toBe(payLinkFees);
   });
 
   it('?fee=0 -> [] (fees disabled)', () => {
-    expect(resolveFeeLines(qs({ fee: '0' }), { payLinkFees, feePresets })).toEqual([]);
+    expect(resolveFeeLines(qs({ fee: '0' }), { payLinkFees, feePresets, feeOverrides })).toEqual([]);
   });
 
   it('?fee=<known-key> -> that preset array', () => {
-    expect(resolveFeeLines(qs({ fee: 'creditCard' }), { payLinkFees, feePresets })).toEqual(
+    expect(resolveFeeLines(qs({ fee: 'creditCard' }), { payLinkFees, feePresets, feeOverrides })).toEqual(
       feePresets.creditCard,
     );
   });
 
   it('?fee=<known-key> resolving to an empty preset (noFee) -> []', () => {
-    expect(resolveFeeLines(qs({ fee: 'noFee' }), { payLinkFees, feePresets })).toEqual([]);
+    expect(resolveFeeLines(qs({ fee: 'noFee' }), { payLinkFees, feePresets, feeOverrides })).toEqual([]);
   });
 
   it('?fee=<unknown-key> -> falls back to default payLinkFees (never throws)', () => {
-    expect(resolveFeeLines(qs({ fee: 'bogus' }), { payLinkFees, feePresets })).toBe(payLinkFees);
+    expect(resolveFeeLines(qs({ fee: 'bogus' }), { payLinkFees, feePresets, feeOverrides })).toBe(payLinkFees);
   });
 
   it('?fee=<key> with no feePresets configured at all -> falls back to default (never throws)', () => {
-    expect(resolveFeeLines(qs({ fee: 'creditCard' }), { payLinkFees })).toBe(payLinkFees);
+    expect(resolveFeeLines(qs({ fee: 'creditCard' }), { payLinkFees, feeOverrides })).toBe(payLinkFees);
   });
 });
 

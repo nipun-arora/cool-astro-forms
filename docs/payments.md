@@ -86,8 +86,8 @@ the amount it encodes. Query parameters:
 | `?amount=200` | Base amount in **DOLLARS** — the primary contract. Decimals allowed (`amount=199.50`), up to 2 places. Whole dollars or `\d+\.\d{1,2}` — no sign, no exponent notation, no thousands separators. |
 | `?pay=20000` | Legacy alias in **CENTS** — kept for backward compatibility with pre-existing `?pay=` integrations. Non-negative integers only. |
 | `&label=` | Optional display label/memo, HTML-escaped when rendered. |
-| `&fee=0` | Disables fee lines entirely for this link. |
-| `&fee=<preset-key>` | Applies a named preset from `payments.feePresets` instead of the default `payments.payLinkFees`. An unrecognized key silently falls back to the default fees (never an error). |
+| `&fee=0` | Disables fee lines entirely for this link — only honoured when `payments.feeOverrides: 'query'`; ignored by default (logged as `payment-request.fee-override-ignored`). |
+| `&fee=<preset-key>` | Applies a named preset from `payments.feePresets` instead of the default `payments.payLinkFees` — only honoured when `payments.feeOverrides: 'query'`; ignored by default (logged as `payment-request.fee-override-ignored`). An unrecognized key silently falls back to the default fees (never an error). |
 | `&currency=usd` | Optional currency override — must be in `payments.requestPage.allowedCurrencies` or the request is rejected. |
 
 **`amount` and `pay` are distinct param names by design (D4)** — this makes a
@@ -97,10 +97,11 @@ silently falls through to a `pay` value in a different unit.
 
 The amount input on the page stays editable, but this is a **preview only**
 — the server always recomputes the total from whatever base amount is
-actually posted. There is no `total`/`fee` field anywhere in the request the
-client could tamper with; every dollar figure charged is computed
-server-side from `payments.payLinkFees`/`feePresets` and the posted base
-amount.
+actually posted. No total or fee AMOUNT is ever read from the request; every
+dollar figure charged is computed server-side from
+`payments.payLinkFees`/`feePresets` and the posted base amount. The `fee`
+SELECTOR above does exist in the request, and it is ignored unless the host
+opts in — see below.
 
 ### Server-enforced caps
 
@@ -137,6 +138,7 @@ payments: {
     // referenced via ?fee=waived
     waived: [],
   },
+  feeOverrides: 'query', // required for ?fee= links to work; a payer can post the same field
 },
 ```
 
@@ -144,6 +146,31 @@ Each fee line is exactly one of `percent` (a decimal ratio, e.g. `0.05` for
 5%, rounded to the nearest cent) or `flatCents` — never both, never neither.
 Fee lines render as their own line items on the breakdown table and on
 Stripe's hosted Checkout page/receipt (not pre-summed into the base amount).
+
+### The fee selector is opt-in (0.1.12)
+
+`payments.feeOverrides` defaults to `'off'`: any `fee` field in the request
+or the page URL is ignored, and the configured `payLinkFees` are always
+charged. This is the fail-closed default, because the pay page's `fee`
+selector is read from the same POSTed body a payer controls — not from a
+channel only the operator sharing the link can reach — so a payer could add
+`fee=0` to their own form post exactly as easily as an operator could put it
+in a link.
+
+Set `feeOverrides: 'query'` to restore the previous behaviour (`?fee=0`
+waives fees, `?fee=<preset-key>` swaps in a `feePresets` entry) for hosts
+that knowingly share fee-free operator links and accept that a payer can
+send the same field. An ignored `fee` field is never rejected — the request
+proceeds at the configured price — but it is logged as
+`payment-request.fee-override-ignored` with `{ ip }` so you can see the
+attempts.
+
+**Upgrading from a pre-0.1.12 version:** any `?fee=0`/`?fee=<preset>` link
+you have already shared stops waiving or swapping fees after upgrading
+unless you set `feeOverrides: 'query'`. If you previously blocked the `fee`
+field yourself (a reverse proxy rule, an Express wrapper check) as a
+workaround, you can drop that guard once you're on 0.1.12 with the default
+`'off'`.
 
 **This package computes and labels a fee line — it does not know or enforce
 surcharge legality on your behalf.** Before shipping a non-zero
