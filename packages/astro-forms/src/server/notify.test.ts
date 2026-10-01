@@ -418,6 +418,180 @@ describe('buildTransport()', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// nodemailer contract, pinned across the 9.x -> 10.x upgrade (0.1.13). These
+// tests fix the exact shape this module hands nodemailer and the exact way it
+// passes nodemailer's answers back, so a dependency bump that changes either
+// side fails here instead of in a host's inbox. They assert on OUR calls
+// (createTransport/sendMail arguments, return value, rejection), never on
+// nodemailer internals, except the jsonTransport round trip, which is there
+// to prove the real library still accepts and serializes the message we build.
+// ---------------------------------------------------------------------------
+
+type SendCase = {
+  name: string;
+  failEvent: string;
+  expectedTo: string;
+  send: (
+    mod: Awaited<ReturnType<typeof loadNotify>>,
+    opts: { transport: Transporter; template: () => { subject: string; text: string; html: string } },
+  ) => Promise<unknown>;
+};
+
+const SEND_CASES: SendCase[] = [
+  {
+    name: 'sendAbandonedLeadEmail',
+    failEvent: 'notify.send-failed',
+    expectedTo: 'owner@example.com',
+    send: (mod, opts) => mod.sendAbandonedLeadEmail(baseData(), opts),
+  },
+  {
+    name: 'sendPaymentQuoteEmail',
+    failEvent: 'notify.payment-quote-sent-failed',
+    expectedTo: 'owner@example.com',
+    send: (mod, opts) => mod.sendPaymentQuoteEmail(baseQuoteData(), opts),
+  },
+  {
+    name: 'sendPaymentReceivedEmail',
+    failEvent: 'notify.payment-received-sent-failed',
+    expectedTo: 'owner@example.com',
+    send: (mod, opts) => mod.sendPaymentReceivedEmail(baseReceivedData(), opts),
+  },
+  {
+    name: 'sendRecoveryEmail',
+    failEvent: 'notify.recovery-sent-failed',
+    expectedTo: 'visitor@example.com',
+    send: (mod, opts) => mod.sendRecoveryEmail(baseRecoveryData(), opts),
+  },
+];
+
+const FIXED_TEMPLATE = () => ({ subject: 'S-PIN', text: 'T-PIN', html: '<p>H-PIN</p>' });
+
+describe('nodemailer contract (pinned across the 9.x -> 10.x upgrade)', () => {
+  it('createTransport receives exactly host, numeric port, auth and the 5s timeouts: no secure/tls/pool keys, so TLS stays nodemailer-negotiated for the host EMAIL_PORT and a hung server cannot pin a worker', async () => {
+    process.env.EMAIL_HOST = 'smtp.example.com';
+    process.env.EMAIL_PORT = '587';
+    process.env.EMAIL_USER = 'user@example.com';
+    process.env.EMAIL_PASS = 'super-secret';
+    const nodemailer = (await import('nodemailer')).default;
+    const createSpy = vi.spyOn(nodemailer, 'createTransport');
+    const { buildTransport } = await loadNotify();
+
+    buildTransport();
+    // Same env twice = one transport per process (memoized), not one per send.
+    buildTransport();
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(createSpy.mock.calls[0]?.[0]).toStrictEqual({
+      host: 'smtp.example.com',
+      port: 587,
+      auth: { user: 'user@example.com', pass: 'super-secret' },
+      connectionTimeout: 5_000,
+      socketTimeout: 5_000,
+    });
+  });
+
+  it('outside production with EMAIL_* unset, createTransport receives exactly { jsonTransport: true }, keeping dev and tests network-free', async () => {
+    const nodemailer = (await import('nodemailer')).default;
+    const createSpy = vi.spyOn(nodemailer, 'createTransport');
+    const { buildTransport } = await loadNotify();
+
+    expect(buildTransport()).toBeTruthy();
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(createSpy.mock.calls[0]?.[0]).toStrictEqual({ jsonTransport: true });
+  });
+
+  it.each(SEND_CASES)(
+    '$name hands sendMail exactly from/to/subject/text/html (no replyTo, no attachments) and returns nodemailer\'s info object untouched',
+    async ({ send, expectedTo }) => {
+      process.env.EMAIL_USER = 'user@example.com';
+      const info = { messageId: '<pin@example.com>', accepted: [expectedTo] };
+      const sendMail = vi.fn(async () => info);
+      const mod = await loadNotify();
+
+      const result = await send(mod, { transport: { sendMail } as unknown as Transporter, template: FIXED_TEMPLATE });
+
+      expect(sendMail).toHaveBeenCalledTimes(1);
+      expect((sendMail.mock.calls as unknown[][])[0]?.[0]).toStrictEqual({
+        from: 'user@example.com',
+        to: expectedTo,
+        subject: 'S-PIN',
+        text: 'T-PIN',
+        html: '<p>H-PIN</p>',
+      });
+      // Callers and tests read the transport's own answer (jsonTransport's
+      // info.message); wrapping or reshaping it would break them silently.
+      expect(result).toBe(info);
+    },
+  );
+
+  it.each(SEND_CASES)(
+    '$name falls back to the noreply sender when EMAIL_USER is unset, so a jsonTransport dev send still has a valid From',
+    async ({ send }) => {
+      const sendMail = vi.fn(async () => ({}));
+      const mod = await loadNotify();
+
+      await send(mod, { transport: { sendMail } as unknown as Transporter, template: FIXED_TEMPLATE });
+
+      expect((sendMail.mock.calls as unknown[][])[0]?.[0]).toMatchObject({ from: 'noreply@cool-astro-forms.local' });
+    },
+  );
+
+  it.each(SEND_CASES)(
+    '$name rethrows the SAME error sendMail rejected with, logs $failEvent with site and form, and does not record a success the canary would report',
+    async ({ send, failEvent }) => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const boom = Object.assign(new Error('smtp exploded'), { code: 'EAUTH' });
+      const sendMail = vi.fn(async () => {
+        throw boom;
+      });
+      const mod = await loadNotify();
+
+      await expect(
+        send(mod, { transport: { sendMail } as unknown as Transporter, template: FIXED_TEMPLATE }),
+      ).rejects.toBe(boom);
+
+      const failLine = errorSpy.mock.calls
+        .map((call) => JSON.parse(call[0] as string) as Record<string, unknown>)
+        .find((line) => line.event === failEvent);
+      expect(failLine).toBeTruthy();
+      expect(failLine).toMatchObject({ level: 'error', siteId: 'demo-site', formId: 'contact-form' });
+      expect((failLine!.error as { message: string }).message).toBe('smtp exploded');
+      expect(mod.getNotifyHealth().lastSuccessAt).toBeNull();
+    },
+  );
+
+  it('a refused SMTP connection settles as a rejected Error (callers fire-and-forget with .catch; a send that never settles would leak a pending promise per abandon)', async () => {
+    // 127.0.0.1:1 refuses instantly and deterministically (LESSONS #57).
+    process.env.EMAIL_HOST = '127.0.0.1';
+    process.env.EMAIL_PORT = '1';
+    process.env.EMAIL_USER = 'user@example.com';
+    process.env.EMAIL_PASS = 'super-secret';
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { sendAbandonedLeadEmail, getNotifyHealth } = await loadNotify();
+
+    await expect(sendAbandonedLeadEmail(baseData())).rejects.toBeInstanceOf(Error);
+
+    const events = errorSpy.mock.calls.map((call) => (JSON.parse(call[0] as string) as { event: string }).event);
+    expect(events).toContain('notify.send-failed');
+    expect(getNotifyHealth().lastSuccessAt).toBeNull();
+  });
+
+  it('real jsonTransport still accepts and serializes the message we build: from, to, subject, text and html all survive the round trip', async () => {
+    process.env.EMAIL_USER = 'user@example.com';
+    const { sendAbandonedLeadEmail } = await loadNotify();
+
+    const info = (await sendAbandonedLeadEmail(baseData(), { template: FIXED_TEMPLATE })) as { message: string };
+    const parsed = JSON.parse(info.message);
+
+    expect(parsed.from).toEqual({ address: 'user@example.com', name: '' });
+    expect(parsed.to).toEqual([{ address: 'owner@example.com', name: '' }]);
+    expect(parsed.subject).toBe('S-PIN');
+    expect(parsed.text).toBe('T-PIN');
+    expect(parsed.html).toBe('<p>H-PIN</p>');
+  });
+});
+
 describe('defaultAbandonedLeadTemplate', () => {
   it('renders with geo absent without emitting the literal string "undefined"', async () => {
     const { defaultAbandonedLeadTemplate } = await loadTemplates();

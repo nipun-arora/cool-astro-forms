@@ -9,6 +9,50 @@ below as **BREAKING** rather than held for a 1.0 major.
 
 Entries are newest first.
 
+## [0.1.13] - 2026-10-01
+
+### Security
+
+- `nodemailer` raised from `^9.0.3` to `^10.0.13`. A fresh install of
+  0.1.12 resolved `^9.0.3` to 9.1.1, which `npm audit` flags with two HIGH
+  and three moderate advisories, all fixed by 10.0.13:
+  - GHSA-v53p-9fqp-m79j (high): quadratic backtracking in the address
+    parser's free-text fallback lets one long header value stall the event
+    loop.
+  - GHSA-prgh-xp8r-p3m5 (high): quadratic parsing of comment-joined
+    addresses, same denial-of-service shape.
+  - GHSA-g57g-f23g-4646 (moderate): a comment after the domain of a
+    quoted local part produced a malformed envelope recipient.
+  - GHSA-8vvx-rff5-p5rq (moderate): deeply nested recipient arrays
+    bypassed the parser's depth limit and exhausted the stack.
+  - GHSA-6vj9-mwq6-2f5v (moderate): the process-wide DNS cache reused one
+    transport's TLS `servername` for another transport on the same host.
+  The 9.0.3 copy pinned in this repo's own lockfile carried four further
+  advisories fixed in 9.1.x (GHSA-2x7j-588g-ccc2 high, GHSA-8m3c-c648-2xjj,
+  GHSA-wmmp-3585-3rmp, GHSA-cc9r-2j5m-2m83); 10.0.13 clears those too.
+  - **Upgrading:** nothing to change in your config or code. If your site
+    also lists `nodemailer` as its own dependency, bump that to
+    `^10.0.13` as well; `npm audit` reports your copy separately from the
+    one this package installs.
+
+### Changed
+
+- nodemailer 10 requires Node 20 or newer. This package already requires
+  Node 22.12.0, so the supported runtime does not change.
+- nodemailer 10 ships its own TypeScript declarations, so the
+  `@types/nodemailer` dev dependency is gone. The package's emitted
+  `server/notify.d.ts` still imports the `Transporter` type from
+  `nodemailer`, which now resolves to those bundled declarations.
+
+### Internal
+
+- New `notify.test.ts` cases pin the exact `createTransport` options
+  (SMTP and the `jsonTransport` fallback), the exact `sendMail` fields for
+  all four package emails, the untouched return value, the rethrown error
+  and failure log line, a refused SMTP connection settling as a rejection,
+  and a real `jsonTransport` round trip. All passed on 9.0.3 before the
+  bump and on 10.0.13 after it; `notify.ts` did not change.
+
 ## [0.1.12] - 2026-09-04
 
 ### Changed

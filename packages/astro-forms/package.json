@@ -1,6 +1,6 @@
 {
   "name": "cool-astro-forms",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "type": "module",
   "license": "MIT",
   "description": "The lead-ops platform for Astro forms: abandonment capture, recovery emails, quote payments, and a self-hosted admin. No external services, just SQLite and SMTP. MIT.",
@@ -198,7 +198,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
-    "nodemailer": "^9.0.3",
+    "nodemailer": "^10.0.13",
     "stripe": "^22.3.2",
     "ulid": "^3.0.2",
     "zod": "^4.4.3"
@@ -217,7 +217,6 @@
     "@playwright/test": "^1.61.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^26.1.1",
-    "@types/nodemailer": "^8.0.1",
     "jsdom": "^29.1.1",
     "tsup": "^8.5.1",
     "typescript": "^7.0.0",
