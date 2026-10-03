@@ -9,7 +9,7 @@ below as **BREAKING** rather than held for a 1.0 major.
 
 Entries are newest first.
 
-## [0.1.15] - Unreleased
+## [0.1.15] - 2026-10-03
 
 ### Changed
 
