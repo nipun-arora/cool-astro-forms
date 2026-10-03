@@ -2,7 +2,7 @@
 
 Catch the leads that leave your Astro forms without hitting submit.
 
-When a visitor types into your form and walks away, the lead is saved. Around that capture sits the complete lead-ops platform: recovery emails, quote payments, and a self-hosted admin, with **zero external services by default**, just a SQLite file and your existing SMTP env vars. 1,368 unit tests and a Playwright e2e suite cover it.
+When a visitor types into your form and walks away, the lead is saved. Around that capture sits the complete lead-ops platform: recovery emails, quote payments, and a self-hosted admin, with **zero external services by default**, just a SQLite file and your existing SMTP env vars. 1,373 unit tests and a Playwright e2e suite cover it.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![npm](https://img.shields.io/npm/v/cool-astro-forms.svg)](https://www.npmjs.com/package/cool-astro-forms)
@@ -120,7 +120,7 @@ With Astro's `security.csp` turned on, the `/forms-admin` pages stay styled and 
 
 ## How it works
 
-1. The injected client script stages fields as the visitor types. Passwords, `data-caf-ignore` fields, and card/CSRF-shaped names are never staged.
+1. The injected client script stages fields as the visitor types. Passwords, `data-caf-ignore` fields, card/CSRF-shaped names, and captcha widget tokens (`cf-turnstile-response`, `h-captcha-response`, `g-recaptcha-response`) are never staged.
 2. Any of the 4 capture triggers POSTs the staged fields to `/api/forms/abandon`.
 3. The server gates the save (origin check, rate limit, honeypot, email-or-phone requirement), dedupes repeat abandons within a 60-minute window, and writes one SQLite row with the journey trail and geolocation attached.
 

@@ -30,6 +30,7 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │
 ├─ CLIENT (zero-dep, gzip budget 5120B asserted in tests: capture.js + journey.js transitive closure)
 │    capture.ts  — stage fields on input/change (denylist: password/[data-caf-ignore]/csrf|token|card|cvv|ssn;
+│                  captcha response inputs (CAPTCHA_RESPONSE_FIELD_NAMES) skipped even under capture.allow;
 │                  FIELD_MAX_BYTES cap); 4 abandon triggers (exit-intent top, leaving-link, beforeunload,
 │                  visibilitychange→hidden); sendBeacon → fetch keepalive fallback; 10s throttle;
 │                  64KB ceiling → minimal-payload fallback; _caf envelope hidden input at submit
@@ -66,11 +67,14 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │    handlers/handle-abandon.ts — pipeline: origin → Content-Length precheck → readBodyCapped (streaming) →
 │         rate limit → honeypot(204) → zod parse → gate (email-or-phone | always) → COOKIE-authoritative
 │         visitorUuid → recomputeJourney (ts sanitize, caps, privacy, ServerJourneyStep durations) →
-│         upsertAbandoned (atomic, site-scoped, already-converted no-op) → geo (never-blocks try/catch) →
+│         geo (never-blocks try/catch) → strip _caf + captcha response fields →
+│         upsertAbandoned (atomic, site-scoped, already-converted no-op) →
 │         verifyToken seam (Turnstile soft-log → _turnstile:'failed' flag persisted) →
-│         fire-and-forget notify (create-only unless notifyOnUpdate) + purgeExpired (hourly, .catch) →
+│         fire-and-forget notify + entry.abandoned webhook, both from the STRIPPED fields
+│         (create-only unless notifyOnUpdate) + purgeExpired (hourly, .catch) →
 │         { saved, reason } + per-branch structured logs
-│    record-submission.ts — NEVER-throws host hook: reads/strips fields._caf envelope, cookie visitorUuid,
+│    record-submission.ts — NEVER-throws host hook: reads/strips fields._caf envelope (and strips captcha
+│         response fields), cookie visitorUuid,
 │         optional ip arg (clientAddress; XFF fallback), geo default from runtime config,
 │         convertAndCreateSubmitted (atomic, converts ALL matches within CONVERT_LOOKBACK_MS), repeat-submit log
 │    geo/ — lookupGeo (ipwhois.io default, provider URL template config, 3s AbortSignal, private-IP skip)

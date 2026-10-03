@@ -40,4 +40,4 @@ The mechanics are built in: `retentionDays` auto-purge, `purgeVisitor()` erasure
 
 ## Is it production-ready?
 
-It runs in production on a live services business, and versions 0.1.2 through 0.1.10 each shipped from a real finding there (persistence across redeploys, proxy CSRF behavior, edge bot-challenges on payment submits). 1,368 unit tests and a Playwright e2e suite cover it, and the README quickstart is verified against a packed tarball on every release.
+It runs in production on a live services business, and versions 0.1.2 through 0.1.10 each shipped from a real finding there (persistence across redeploys, proxy CSRF behavior, edge bot-challenges on payment submits). 1,373 unit tests and a Playwright e2e suite cover it, and the README quickstart is verified against a packed tarball on every release.

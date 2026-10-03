@@ -23,6 +23,20 @@ export const HONEYPOT_FIELD_NAME = '_caf_hp';
  */
 export const CAF_FIELD_NAME = '_caf';
 
+/**
+ * Inputs a captcha widget injects into the host's form to carry its
+ * single-use response token: Cloudflare Turnstile, hCaptcha, reCAPTCHA. Never
+ * visitor data, so client capture never stages them (whatever data-caf-ignore
+ * or an allow list says) and the server strips them before anything is
+ * stored, emailed or sent to a webhook. The package verifies only Turnstile,
+ * and that token reaches the abandon route inside the `_caf` envelope.
+ */
+export const CAPTCHA_RESPONSE_FIELD_NAMES: readonly string[] = [
+  'cf-turnstile-response',
+  'h-captcha-response',
+  'g-recaptcha-response',
+];
+
 /** Name of the `window.caf` client API carrying the submit-success signal. */
 export const CLIENT_API_GLOBAL = 'caf';
 

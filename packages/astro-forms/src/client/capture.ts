@@ -12,7 +12,7 @@
  * Plan 09 (jsdom cannot faithfully fire beforeunload/visibilitychange).
  */
 import { FIELD_MAX_BYTES, MAX_PAYLOAD_BYTES } from '../limits.js';
-import { CAF_FIELD_NAME, CLIENT_API_GLOBAL, HONEYPOT_FIELD_NAME } from '../types.js';
+import { CAF_FIELD_NAME, CAPTCHA_RESPONSE_FIELD_NAMES, CLIENT_API_GLOBAL, HONEYPOT_FIELD_NAME } from '../types.js';
 import type { AbandonPayload, CafClientApi, JourneyStep } from '../types.js';
 import type { CafClientConfig } from './journey.js';
 import { clearTrail, readTrail } from './journey.js';
@@ -145,11 +145,12 @@ export interface StageFieldsOptions {
 
 /**
  * Collects named field values into a plain object. Never stages: the
- * honeypot input, the `_caf` envelope input, `input[type=password]`,
- * `[data-caf-ignore]` elements, or names matching the built-in denylist
- * (csrf/token/card/cvv/ssn/password) or `opts.deny`. When `opts.allow` is
- * present, ONLY listed names stage. Each value is truncated to
- * FIELD_MAX_BYTES.
+ * honeypot input, the `_caf` envelope input, a captcha widget's response
+ * input (CAPTCHA_RESPONSE_FIELD_NAMES — even when `opts.allow` names it),
+ * `input[type=password]`, `[data-caf-ignore]` elements, or names matching
+ * the built-in denylist (csrf/token/card/cvv/ssn/password) or `opts.deny`.
+ * When `opts.allow` is present, ONLY listed names stage. Each value is
+ * truncated to FIELD_MAX_BYTES.
  */
 export function stageFields(form: HTMLFormElement, opts: StageFieldsOptions = {}): Record<string, string> {
   const staged: Record<string, string> = {};
@@ -159,6 +160,7 @@ export function stageFields(form: HTMLFormElement, opts: StageFieldsOptions = {}
     const name = el.getAttribute('name');
     if (!name) continue;
     if (name === HONEYPOT_FIELD_NAME || name === CAF_FIELD_NAME) continue;
+    if (CAPTCHA_RESPONSE_FIELD_NAMES.includes(name)) continue;
     if (el instanceof HTMLInputElement && el.type === 'password') continue;
     if (el.hasAttribute('data-caf-ignore')) continue;
 

@@ -9,6 +9,47 @@ below as **BREAKING** rather than held for a 1.0 major.
 
 Entries are newest first.
 
+## [0.1.16] - 2026-10-03
+
+### Fixed
+
+- **Abandoned drafts no longer store the captcha widget's response token.**
+  Cloudflare Turnstile injects a hidden `cf-turnstile-response` input into
+  the form it renders in. It had no `data-caf-ignore` and its name is not on
+  the built-in denylist, so client capture staged it and every abandoned or
+  converted draft kept the full token, which then showed in the admin, the
+  CSV export and the abandoned-lead email. Capture now never stages
+  `cf-turnstile-response`, `h-captcha-response` or `g-recaptcha-response`,
+  whatever `data-caf-ignore` or a form's `capture.allow` list says (the
+  package verifies only Turnstile, but a host's own hCaptcha or reCAPTCHA
+  widget in a tagged form leaked the same way). The server strips the same
+  three names before it stores an abandoned draft and in `recordSubmission()`,
+  so a host that passes its whole form post, or a browser still running an
+  older capture script, cannot store one either. The Turnstile token the
+  abandon route verifies still travels inside the `_caf` envelope and is
+  checked as before. The tokens were single-use and expire after about 300
+  seconds, so the stored copies were dead values, not live credentials.
+  - **Upgrading:** nothing to change. Rows saved before the upgrade keep the
+    token: abandoned drafts age out after `retentionDays` (default 90), and
+    converted and submitted rows keep it until you remove it. To clear them
+    by hand, back up the database and run this once (SQLite or Turso; it
+    edits only rows that hold one of the keys and leaves `updated_at`
+    alone):
+
+    ```sql
+    UPDATE entries
+    SET fields = json_remove(fields, '$."cf-turnstile-response"', '$."h-captcha-response"', '$."g-recaptcha-response"')
+    WHERE json_type(fields, '$."cf-turnstile-response"') IS NOT NULL
+       OR json_type(fields, '$."h-captcha-response"') IS NOT NULL
+       OR json_type(fields, '$."g-recaptcha-response"') IS NOT NULL;
+    ```
+
+- The abandoned-lead notification email and the `entry.abandoned` webhook
+  were built from the raw request fields, not the stored copy, so on a
+  Turnstile-enabled site they still carried the `_caf` envelope (the token
+  JSON) after storage stopped keeping it in 0.1.11. Both now send the stored
+  fields, the same set the admin shows. `entry.submitted` never carried it.
+
 ## [0.1.15] - 2026-10-03
 
 ### Changed

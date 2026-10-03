@@ -367,6 +367,33 @@ describe('recordSubmission — journey envelope', () => {
     expect(callArgs.journey[0]).not.toHaveProperty('duration');
   });
 
+  // A host that hands over its whole form post (Object.fromEntries(formData))
+  // passes the captcha widget's response along with the visitor's answers.
+  // The host has already verified it by then; stored, it is only a dead token
+  // in the admin, the CSV export and the entry.submitted webhook.
+  it('strips captcha widget responses (Turnstile, hCaptcha, reCAPTCHA) from the submitted entry and the entry.submitted webhook', async () => {
+    const convertAndCreateSubmitted = vi.fn(async (_input: ConvertInput) => ({ converted: 0, entry: makeEntry() }));
+    const deliverWebhook = vi.fn();
+
+    await recordSubmission(
+      {
+        siteId: 'demo-site',
+        formId: 'contact-form',
+        fields: {
+          email: 'jane@example.com',
+          'cf-turnstile-response': '0.turnstile-token',
+          'h-captcha-response': 'P1_hcaptcha-token',
+          'g-recaptcha-response': '03recaptcha-token',
+        },
+        request: makeRequest('_caf_uid=visitor-1'),
+      },
+      { storage: makeFakeStorage({ convertAndCreateSubmitted }), deliverWebhook, now: () => 5000 },
+    );
+
+    expect(convertAndCreateSubmitted.mock.calls[0]![0].fields).toEqual({ email: 'jane@example.com' });
+    expect((deliverWebhook.mock.calls[0]![1] as { fields: unknown }).fields).toEqual({ email: 'jane@example.com' });
+  });
+
   it('accepts an already-parsed _caf object (not a JSON string)', async () => {
     const convertAndCreateSubmitted = vi.fn(async (_input: ConvertInput) => ({ converted: 0, entry: makeEntry() }));
 

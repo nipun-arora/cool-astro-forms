@@ -18,6 +18,7 @@
 import { CONVERT_LOOKBACK_MS } from '../limits.js';
 import {
   CAF_FIELD_NAME,
+  CAPTCHA_RESPONSE_FIELD_NAMES,
   type DriveLinkAccess,
   type FileInput,
   type FileUploadOutcome,
@@ -272,10 +273,13 @@ export async function recordSubmission(
     const visitorUuid = cookieUuid ?? fieldsUuid ?? '';
 
     // Machine-data envelope — parsed defensively, then stripped from the
-    // fields blob persisted on the entry.
+    // fields blob persisted on the entry. A captcha widget's response input
+    // (a host passing its whole form post) is stripped the same way; the
+    // host has already verified it.
     const fieldsCopy: Record<string, unknown> = { ...args.fields };
     const rawEnvelope = fieldsCopy[CAF_FIELD_NAME];
     delete fieldsCopy[CAF_FIELD_NAME];
+    for (const name of CAPTCHA_RESPONSE_FIELD_NAMES) delete fieldsCopy[name];
     const envelopeJourney = parseCafEnvelope(rawEnvelope, logFn);
     const recomputed = recomputeJourney(envelopeJourney, now);
 

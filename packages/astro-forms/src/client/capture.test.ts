@@ -36,6 +36,36 @@ describe('stageFields', () => {
     expect(stageFields(form)).toEqual({ email: 'visitor@example.com' });
   });
 
+  // Found on a consuming site in production (2026-10-03): Cloudflare injects a hidden
+  // `cf-turnstile-response` input into the host's form, it carries no
+  // data-caf-ignore, and its name slips past the denylist ("token" is not in
+  // it), so every abandoned draft stored the full Turnstile token. A captcha
+  // response is a single-use bot-check token minted by the provider, never
+  // something the visitor typed, so it must never reach a draft.
+  it('never stages a captcha widget response (Turnstile, hCaptcha, reCAPTCHA) even without data-caf-ignore, and the existing exclusions still apply', () => {
+    const form = buildForm(`
+      <input name="email" value="visitor@example.com" />
+      <input name="company" value="Acme" />
+      <input type="hidden" name="cf-turnstile-response" value="0.turnstile-token" />
+      <textarea name="h-captcha-response">P1_hcaptcha-token</textarea>
+      <textarea name="g-recaptcha-response">03recaptcha-token</textarea>
+      <input name="_caf_hp" value="bot-bait" />
+      <input name="internalNote" value="ignored" data-caf-ignore />
+    `);
+
+    expect(stageFields(form)).toEqual({ email: 'visitor@example.com', company: 'Acme' });
+  });
+
+  // An allow list bypasses the denylist entirely, so a skip that lived in the
+  // deny branch would leak the token on any form configured with `allow`.
+  it('never stages a captcha widget response even when opts.allow names it', () => {
+    const form = buildForm(`
+      <input name="email" value="a@b.com" />
+      <input type="hidden" name="cf-turnstile-response" value="0.turnstile-token" />
+    `);
+    expect(stageFields(form, { allow: ['email', 'cf-turnstile-response'] })).toEqual({ email: 'a@b.com' });
+  });
+
   it('excludes denylist-matched names case-insensitively (csrf/token/card/cvv/ssn/password)', () => {
     const form = buildForm(`
       <input name="email" value="a@b.com" />
@@ -547,6 +577,27 @@ describe('Turnstile token recycling after an abandon send (single-use token)', (
     document.dispatchEvent(new MouseEvent('mouseleave', { clientY: 0 }));
 
     expect(resetSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a draft send carries the token only inside the _caf envelope (which the server verifies, then strips), never as the widget\'s own cf-turnstile-response field', async () => {
+    const form = buildForm(`
+      <input name="email" value="draft@example.com" />
+      <input type="hidden" name="cf-turnstile-response" value="widget-token" />
+    `);
+    form.setAttribute('data-caf', 'form-recycle-widget-input');
+    window.__cafConfig = { siteId: 'site-1' };
+    init();
+
+    setTurnstileToken('widget-token');
+    const { getBodies } = captureSentBodies();
+
+    form.querySelector('input[name="email"]')!.dispatchEvent(new Event('input', { bubbles: true }));
+    document.dispatchEvent(new MouseEvent('mouseleave', { clientY: 0 }));
+
+    const [body] = (await getBodies()).filter((b) => formIdOf(b) === 'form-recycle-widget-input');
+    const fields = (JSON.parse(body!) as { fields: Record<string, unknown> }).fields;
+    expect(Object.keys(fields).sort()).toEqual([CAF_FIELD_NAME, 'email']);
+    expect(tokenOf(body!)).toBe('widget-token');
   });
 
   it('never touches the widget on a send that carried no token — a page whose visitor never solved the challenge has nothing to re-arm', () => {

@@ -672,6 +672,45 @@ describe('handleAbandon — turnstile-flag seam (D3)', () => {
     expect(verifyToken).toHaveBeenCalledWith('tok-abc', '203.0.113.5');
   });
 
+  // The route accepts JSON from any browser, including one still running a
+  // capture.js from before the client stopped staging these, so the server
+  // is the boundary that has to keep a provider's token out of the draft row
+  // (and so out of the admin, the CSV export and the recovery email), the
+  // owner's abandon email and the entry.abandoned webhook. Those last two read
+  // the request, not the stored row, which is how the _caf envelope also
+  // reached them after storage stopped keeping it.
+  it('captcha widget responses and the _caf envelope reach neither the stored draft, the notify email nor the webhook, while the envelope token still reaches verifyToken', async () => {
+    const verifyToken = vi.fn(async () => ({ ok: true }));
+    const notify = vi.fn(async (_data: AbandonedLeadEmailData) => ({}));
+    const deliverWebhook = vi.fn();
+    const upsertAbandoned = vi.fn(
+      async (_input: { fields: Record<string, unknown> }): Promise<UpsertAbandonedResult> => ({ outcome: 'created', entry: makeEntry() }),
+    );
+    await handleAbandon(
+      makeInput({
+        body: {
+          fields: {
+            email: 'jane@example.com',
+            'cf-turnstile-response': '0.turnstile-token',
+            'h-captcha-response': 'P1_hcaptcha-token',
+            'g-recaptcha-response': '03recaptcha-token',
+            _caf: JSON.stringify({ turnstileToken: 'tok-abc' }),
+          },
+        },
+      }),
+      makeDeps({
+        storage: makeFakeStorage({ upsertAbandoned: upsertAbandoned as never }),
+        verifyToken,
+        notify,
+        deliverWebhook,
+      }),
+    );
+    expect(upsertAbandoned.mock.calls[0]![0].fields).toEqual({ email: 'jane@example.com' });
+    expect(notify.mock.calls[0]![0].fields).toEqual({ email: 'jane@example.com' });
+    expect((deliverWebhook.mock.calls[0]![1] as { fields: unknown }).fields).toEqual({ email: 'jane@example.com' });
+    expect(verifyToken).toHaveBeenCalledWith('tok-abc', '203.0.113.5');
+  });
+
   it('a missing _caf envelope resolves an undefined token, still passed to verifyToken', async () => {
     const verifyToken = vi.fn(async () => ({ ok: true }));
     const upsertAbandoned = vi.fn(async (): Promise<UpsertAbandonedResult> => ({ outcome: 'created', entry: makeEntry() }));

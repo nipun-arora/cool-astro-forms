@@ -17,7 +17,7 @@
 import { z } from 'zod';
 import type { CoolFormsConfig } from '../../config.js';
 import { MAX_PAYLOAD_BYTES } from '../../limits.js';
-import { CAF_FIELD_NAME, type Geo, type JourneyStep, type WebhookEventType } from '../../types.js';
+import { CAF_FIELD_NAME, CAPTCHA_RESPONSE_FIELD_NAMES, type Geo, type JourneyStep, type WebhookEventType } from '../../types.js';
 import type { AbandonedLeadEmailData } from '../notify.js';
 import type { RateLimiter } from '../security/rate-limit.js';
 import { isHoneypotTripped } from '../security/honeypot.js';
@@ -284,10 +284,13 @@ export async function handleAbandon(
   }
 
   // 9. Atomic dedupe save (ABND-03). The _caf transport envelope (Turnstile
-  // token) is stripped from STORED fields — mirrors record-submission.ts;
-  // token extraction below (9b) reads payload.fields, not the stored copy.
+  // token) and any captcha widget's own response input are stripped from
+  // STORED fields — mirrors record-submission.ts; token extraction below (9b)
+  // reads payload.fields, not the stored copy. The webhook (9c) and notify
+  // (10) send this stripped copy too, never the raw request fields.
   const storedFields = { ...payload.fields };
   delete storedFields[CAF_FIELD_NAME];
+  for (const name of CAPTCHA_RESPONSE_FIELD_NAMES) delete storedFields[name];
   let result;
   try {
     result = await deps.storage.upsertAbandoned(
@@ -366,7 +369,7 @@ export async function handleAbandon(
       id: result.entry.id,
       siteId: payload.siteId,
       formId: payload.formId,
-      fields: payload.fields,
+      fields: storedFields,
       geo,
       createdAt: result.entry.createdAt,
     });
@@ -383,7 +386,7 @@ export async function handleAbandon(
         siteId: payload.siteId,
         formId: payload.formId,
         notifyTo: formConfig.notifyTo,
-        fields: payload.fields,
+        fields: storedFields,
         journey: recomputed.steps,
         pageUrl: payload.pageUrl,
         referrer: payload.referrer,

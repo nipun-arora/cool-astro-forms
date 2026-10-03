@@ -56,6 +56,10 @@ test.describe('Turnstile — ALWAYS-PASS dummy keys', () => {
     const [row] = await waitForAbandoned(request, 1, TURNSTILE_PASS_URL);
     expect(row.fields.email).toBe('turnstile-pass@example.com');
     expect(row.fields._turnstile).toBeUndefined();
+    // The widget's own hidden input sits inside the tagged form; its token
+    // reaches the server only inside the _caf envelope and is never stored
+    // on the draft (found on a production site, 2026-10-03).
+    expect(row.fields).not.toHaveProperty('cf-turnstile-response');
   });
 });
 

@@ -27,7 +27,7 @@ sequenceDiagram
 
 ## 1. Capture: triggers, staging, and the server gate
 
-The client stages field values as the visitor types (`input`/`change` events) and never stages 3 categories: password inputs, anything marked `data-caf-ignore`, and fields whose names match `csrf|token|card|cvv|ssn`. Each field is capped in bytes, and the whole payload is capped at 64KB. An oversized payload degrades to a minimal payload rather than failing.
+The client stages field values as the visitor types (`input`/`change` events) and never stages 4 categories: password inputs, anything marked `data-caf-ignore`, fields whose names match `csrf|token|card|cvv|ssn`, and the hidden response input a captcha widget injects into the form (`cf-turnstile-response`, `h-captcha-response`, `g-recaptcha-response`), even when a form's `capture.allow` list names it. The server strips those three names again before it stores, emails or webhooks a draft, and `recordSubmission()` strips them from the submitted entry, so a provider's single-use token never lands in the admin, the CSV export or an email. Each field is capped in bytes, and the whole payload is capped at 64KB. An oversized payload degrades to a minimal payload rather than failing.
 
 **4 triggers fire an abandon send**, each named in the client source:
 
