@@ -6,7 +6,9 @@
  * TURNSTILE_SECRET_KEY are configured (integration.ts). Fully inert (no
  * script tag, no widget, no network call) when `window.__cafConfig`'s
  * `turnstileSiteKey` is absent — that's what keeps a keys-absent site
- * byte-identical to Phase 1.
+ * byte-identical to Phase 1 — and, from 0.1.15, on any page that has no
+ * `[data-caf]` form. A form that appears later (a client:only island, a form
+ * a script inserts, a ClientRouter navigation) loads the script then.
  *
  * Renders one explicit-mode widget per `[data-caf]` form (mirrors
  * capture.ts's own tagging convention) and forwards the minted token to
@@ -138,17 +140,43 @@ function loadScript(sitekey: string): void {
   document.head.appendChild(script);
 }
 
+/** Set while a form-less page waits for its first `[data-caf]` form. */
+let formWatch: MutationObserver | undefined;
+
+/** Test-only: stops waiting for a form so cases do not inherit each other's observer. */
+export function stopFormWatch(): void {
+  formWatch?.disconnect();
+  formWatch = undefined;
+}
+
 /**
  * Inert (no script tag injected, no widget rendered) unless
  * `window.__cafConfig.turnstileSiteKey` is present — which the integration
  * only ever sets when BOTH TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY are
- * configured on the host (BOT-01). SSR-guarded.
+ * configured on the host (BOT-01) — AND the page has a `[data-caf]` form
+ * (0.1.15: the script used to load on every page of the site).
+ *
+ * With no form yet, it watches the DOM and loads the script when the first
+ * `[data-caf]` form appears, then stops watching. api.js's onload pass
+ * renders a widget into every form present by then, so a client-rendered
+ * form still gets one, as it did when the script loaded on every page.
+ * SSR-guarded.
  */
 export function init(): void {
   if (typeof document === 'undefined') return;
   const siteKey = window.__cafConfig?.turnstileSiteKey;
   if (!siteKey) return;
-  loadScript(siteKey);
+  if (document.querySelector('[data-caf]')) {
+    loadScript(siteKey);
+    return;
+  }
+  if (formWatch || typeof MutationObserver === 'undefined') return;
+  formWatch = new MutationObserver(() => {
+    if (!document.querySelector('[data-caf]')) return;
+    stopFormWatch();
+    loadScript(siteKey);
+  });
+  formWatch.observe(document.documentElement, { childList: true, subtree: true });
 }
 
 init();

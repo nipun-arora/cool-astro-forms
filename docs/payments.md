@@ -13,7 +13,7 @@ install. Nothing below is required to use the rest of the package.
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `STRIPE_SECRET_KEY` | To enable Stripe | Server-only Stripe secret key (test or live). Enables `/forms-pay`, the admin quote-flow's "Pay with card" link, and the inbound `/api/forms/webhooks/stripe` route. |
+| `STRIPE_SECRET_KEY` | To enable Stripe | Server-only Stripe secret key (test or live). Enables `/forms-pay`, the admin quote-flow's "Pay with card" link, `createCheckoutForEntry`, and the inbound `/api/forms/webhooks/stripe` route. |
 | `STRIPE_WEBHOOK_SECRET` | To verify inbound Stripe webhooks | The signing secret Stripe gives you for the endpoint below. Without it, `/api/forms/webhooks/stripe` rejects every delivery (fails closed — never processes an unverifiable event). |
 | `PAYPAL_CLIENT_ID` | To enable PayPal | REST app client ID (sandbox or live). |
 | `PAYPAL_CLIENT_SECRET` | To enable PayPal | REST app client secret. Both `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` must be set together — either alone leaves PayPal inert. |
@@ -31,8 +31,9 @@ provider-scoped to their own key pair.
 In each provider's dashboard, point the webhook configuration at:
 
 - Stripe: `https://your-site.example/api/forms/webhooks/stripe`
-  (events: `checkout.session.completed`, plus any refund events you want
-  recorded)
+  (events: `checkout.session.completed`, and from 0.1.15
+  `checkout.session.async_payment_succeeded` if your account offers any
+  delayed payment method)
 - PayPal: `https://your-site.example/api/forms/webhooks/paypal`
   (event: `PAYMENT.CAPTURE.COMPLETED`)
 
@@ -47,6 +48,40 @@ admin quote-flow's redirect — ever flips a payment's status. If a visitor
 closes the tab before the provider's redirect completes, the webhook still
 arrives and the payment still gets marked paid.
 
+### What the Stripe webhook checks before it marks a payment paid (0.1.15)
+
+A valid signature is not enough. The webhook treats the matched row as the
+contract and marks it `paid` only when all of these hold:
+
+- the event is `checkout.session.completed` or
+  `checkout.session.async_payment_succeeded`;
+- the session's `payment_status` is `paid` (a delayed payment method
+  completes the session `unpaid` first and settles later with
+  `async_payment_succeeded`);
+- the session's `amount_total` equals the row's stored amount, and its
+  `currency` equals the row's currency (compared case-insensitively; for a
+  session that Stripe converted with Adaptive Pricing under an API version
+  before 2025-03-31, the original amount and currency under
+  `currency_conversion` are compared instead).
+
+Anything else is recorded on the payment's event log without the paid
+status, logged as `webhook.settlement-mismatch` (with the reason
+`not-paid`, `amount` or `currency`, and both sides' values), and answered
+with 200 so Stripe does not retry it. No "payment received" email goes out
+and no outbound `payment.paid` webhook fires. PayPal's webhook is unchanged.
+
+Matching: a session is found by its own id (`cs_…`). If none matches and the
+session came from a Stripe Payment Link, the link id (`plink_…`) is tried
+next. Up to 0.1.14 the admin quote flow stored the link id while the webhook
+only looked up the session id, so payments made through those links were
+never marked paid and nobody was emailed. Links created by
+0.1.14 or earlier are matched too once you upgrade.
+
+**Known limit:** refunds, disputes and expired sessions do not change a
+payment's status in `/forms-admin`. The webhook acknowledges those events
+and leaves the row as it was, so reconcile refunds and disputes in the
+Stripe dashboard.
+
 ## 2. Admin quote-flow
 
 From an entry's detail page (`/forms-admin/entries/:id`), "Create payment
@@ -58,6 +93,133 @@ auto-emailed to the visitor via the existing notify seam (fire-and-forget —
 the copy-link UI is always shown regardless of whether the email send
 succeeded).
 
+From 0.1.15:
+
+- The currency is `payments.quoteCurrency` (default `'usd'`, which is what
+  the flow always charged before). It must be a two-decimal currency (AED,
+  EUR, GBP and so on), because the form reads `200.50` as 20050 minor
+  units; a zero- or three-decimal code fails config validation. For any
+  other currency, build your own page with `createCheckoutForEntry` (§2a).
+- Each Stripe Payment Link accepts one completed checkout
+  (`restrictions.completed_sessions.limit: 1`): one quote row, one payment.
+- `payments.adminQuote` decides what the entry page offers:
+
+  ```js
+  payments: {
+    quoteCurrency: 'aed',
+    // 'builtin' (default): the "Create payment link" form.
+    // 'off': no control, and /forms-admin/payments/action is not injected.
+    // { href }: a "Create a quote" link to your own page instead, with
+    //   ?entry=<id> added to the query (before any #fragment); the
+    //   built-in route is not injected.
+    adminQuote: { href: '/forms-admin/quote/' },
+  },
+  ```
+
+  `href` must be a site path starting with `/` or an http(s) URL. A path is
+  checked the way a browser resolves it, so `/\evil.com` and a tab or line
+  break between two slashes (both read as `//evil.com`) are rejected.
+
+## 2a. Host-built checkouts: `createCheckoutForEntry` and `isAdminRequest` (0.1.15)
+
+A desk that quotes from its own page (an AED amount set once availability is
+confirmed, say, or a deposit with its own product name) can use two typed
+helpers from `cool-astro-forms/server`. The page never touches the
+package's storage internals:
+
+```ts
+// src/pages/forms-admin/quote/create.ts (a host route under /forms-admin)
+import type { APIRoute } from 'astro';
+import { createCheckoutForEntry, isAdminRequest } from 'cool-astro-forms/server';
+
+export const prerender = false;
+
+export const POST: APIRoute = async (context) => {
+  // The package middleware already guards every /forms-admin path; check
+  // again before creating anything that takes money. Keep this route under
+  // /forms-admin: the admin cookie is only sent there.
+  if (!isAdminRequest(context)) return new Response(null, { status: 401 });
+
+  const body = await context.request.json();
+  const result = await createCheckoutForEntry({
+    entryId: body.entryId,
+    amountCents: body.amountFils, // integer minor units, decided by the desk, never by the payer
+    currency: 'aed',
+    customerEmail: body.email, // optional
+    expiresAt: new Date(Date.now() + 23 * 60 * 60 * 1000), // 30 minutes to 24 hours ahead
+    successUrl: 'https://example.com/payment/received/',
+    cancelUrl: 'https://example.com/payment/cancelled/',
+    idempotencyKey: body.quoteId, // a fresh UUID per quote form render
+    metadata: { booking_ref: body.ref }, // optional; entry_id is set for you
+    productName: `Booking ${body.ref}`, // optional; default "Payment"
+  });
+  if (!result.ok) return Response.json({ error: result.code }, { status: 400 });
+  return Response.json({ url: result.url, expiresAt: result.expiresAt });
+};
+```
+
+`createCheckoutForEntry` never throws. In order, it:
+
+1. validates every input (a positive integer amount, a three-letter
+   currency, an expiry 30 minutes to 24 hours ahead, absolute http(s) URLs,
+   a 1-255 character idempotency key, string metadata without `entry_id`)
+   and returns `invalid-input` before anything else happens;
+2. returns `stripe-not-configured` without `STRIPE_SECRET_KEY`, and
+   `entry-not-found` or `storage-error` if the entry cannot be read, all
+   before Stripe is called;
+3. creates a card-only Checkout Session for exactly that amount, with
+   `metadata.entry_id` on the session and its payment intent, under your
+   idempotency key (`provider-error` if Stripe refuses);
+4. records the payment row with the session id (`cs_…`) as its provider
+   reference, which is what the webhook looks up;
+5. if that write fails, expires the session at Stripe and returns
+   `record-failed` (with `sessionExpired`) instead of the URL, so a guest can
+   never be charged for a session the admin does not know about.
+
+A reused key (a double-click, or the same rendered quote form posted twice)
+makes Stripe replay the session it already created, flagged with the
+`Idempotent-Replayed: true` response header. A replay never writes a row
+and never expires the session, because the session belongs to the earlier
+call and its link may already be with the payer:
+
+- if the earlier call recorded the session, the helper returns the same
+  URL;
+- if it has not (it is still writing the row, or it failed and expired the
+  session), the helper returns `replay-unrecorded` and no URL. Retry with
+  the same key in a moment, or with a new key for a new session;
+- if the row cannot be read, it returns `storage-error` and leaves the
+  session open.
+
+The built-in SQLite and Turso adapters also write at most one payment row
+per provider reference, with the check and the insert in one statement. So
+a paid payment never has an unpaid twin beside it, even when two posts of
+the same form overlap.
+
+After `record-failed`, retry with a new idempotency key: Stripe replays the
+original (now expired) session for a reused key, for 24 hours. For the same
+reason, do not derive the key from the entry and amount.
+
+The amount is in the currency's smallest unit (`formatMoney` from
+`cool-astro-forms/server` turns it back into a display string, for example
+`AED 2,500.00`). A Stripe restricted key with write access to Checkout
+Sessions is enough for this helper (it creates and, on failure, expires
+sessions); the built-in Payment Link flow also needs Payment Links access.
+
+`isAdminRequest(context)` takes Astro's `APIContext` or the `Astro` global
+and returns `true` only for a valid, unexpired `/forms-admin` session
+cookie, verified with the same secret as the package's own guard. It fails
+closed (no cookie, a forged or expired token, or an unresolvable secret all
+return `false`) and never throws.
+
+Put host admin pages and routes under `/forms-admin`. The session cookie is
+set with `Path=/forms-admin`, so the browser never sends it to `/api/quote`
+or any other path outside that prefix, and `isAdminRequest` is always
+`false` there. Under the prefix the package middleware also guards the
+request, and `isAdminRequest` is the explicit second check. Called from a
+path outside the prefix, it logs one `admin.is-admin-request-outside-admin-path`
+warning naming the path. Do not widen the cookie path or drop the check to
+make such a route work; move the route.
+
 ### Overriding transactional email templates
 
 Set `templatesModule` in your `coolForms()` config to a host-relative module
@@ -68,13 +230,25 @@ export interface CafTemplates {
   abandonedLead?: (data) => { subject: string; text: string; html?: string };
   paymentQuote?: (data) => { subject: string; text: string; html?: string };
   paymentReceived?: (data) => { subject: string; text: string; html?: string };
+  recovery?: (data) => { subject: string; text: string; html?: string };
 }
 ```
 
 Every key is optional — an omitted key falls back to this package's own
 default template for that email. `paymentQuote` fires when a payment link is
 created (admin quote-flow or `/forms-pay`); `paymentReceived` fires when the
-inbound webhook confirms payment.
+inbound webhook confirms payment; `recovery` is the lead-recovery follow-up
+(honoured from 0.1.15; earlier versions ignored it). The types
+(`CafTemplates` and each template's data type), `escapeHtml` and the
+currency-aware `formatMoney(amountMinorUnits, currency)` are exported from
+`cool-astro-forms/server` for use in your templates module.
+
+`escapeHtml` stops a value from breaking out of an attribute or tag. It does
+not make a URL safe: a `javascript:` or `data:` link survives it unchanged.
+The URLs the package hands your templates are already checked. The
+recovery template's `resumeUrl` is the abandoned page only when that page is
+an http(s) URL on your `siteUrl` origin, and your `siteUrl` otherwise
+(docs/recovery.md). Any other URL you put in an `href` is yours to check.
 
 ## 3. The `/forms-pay` shared-link contract
 

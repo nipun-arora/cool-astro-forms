@@ -23,6 +23,7 @@ import { logError } from '../log.js';
 import { getDb } from '../storage/db.js';
 import { SqliteStorage } from '../storage/sqlite.js';
 import {
+  ADMIN_STYLE_HASH,
   applyEntriesDefaultExclusion,
   parseEntryFilter,
   renderAdminPageHtml,
@@ -34,6 +35,10 @@ export const prerender = false;
 
 type ConfigWithTrailingSlash = typeof config & { trailingSlash?: 'always' | 'never' | 'ignore' };
 const trailingSlash = (config as ConfigWithTrailingSlash).trailingSlash;
+
+// 0.1.15: under the host's Astro CSP, allow the admin shell's inline <style>
+// by hash. Only read Astro.csp when CSP is on (it warns per request otherwise).
+if (config.cspEnabled) Astro.csp?.insertStyleHash(ADMIN_STYLE_HASH);
 
 const filter = applyEntriesDefaultExclusion(parseEntryFilter(Astro.url.searchParams), Astro.url.searchParams);
 

@@ -138,6 +138,25 @@ re-consent flow, no way for a future abandon to re-trigger a follow-up for
 that visitor, short of the visitor manually clearing their own
 localStorage/cookie identity and generating a brand-new UUID.
 
+**Branding the follow-up.** Export a `recovery` function from your
+`templatesModule` (see docs/payments.md, "Overriding transactional email
+templates"). It receives `{ to, siteId, formId, resumeUrl, unsubscribeUrl }`
+and returns `{ subject, text, html? }`; keep the `unsubscribeUrl` link in
+both parts. Versions up to 0.1.14 accepted this key but never used it, so
+the default text went out regardless; 0.1.15 sends your template.
+
+**The resume link is checked before it reaches the email.** The abandoned
+page's URL arrives in the unauthenticated abandon POST, and a client
+outside a browser can send any `Origin` header. So the sweep uses it as
+`resumeUrl` only when it resolves to an http(s) URL on your `siteUrl`
+origin, made absolute against `siteUrl`. Anything else (another host, a
+`javascript:` or `data:` URL, a protocol relative or backslash path) is
+replaced by `siteUrl`. The check runs when the email is sent, so rows saved
+by earlier versions are covered too. A site served on a different origin
+than its `siteUrl` (`www.` against the bare domain, say) gets `siteUrl` as
+the link. `escapeHtml` does not make a URL safe; rely on this check, or
+check any other URL your template links to yourself.
+
 ### Retention rationale (binding design decision, D4a)
 
 The suppression record (`recovery_suppressions` — just a visitor UUID and a

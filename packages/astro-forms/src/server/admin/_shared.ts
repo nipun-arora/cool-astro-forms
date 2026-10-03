@@ -6,8 +6,9 @@
  * rejected once already). P05 extends this file with entry-filter/render
  * helpers shared between the admin list views (entries/abandoned/payments +
  * the page shell every P05 view reuses) — it is a compiled .ts module.
- * login.astro (P03) intentionally stays a standalone page, not built from
- * these render helpers (it IS the unauthenticated entry point, no nav).
+ * login.astro (P03) is the unauthenticated entry point, so it has no nav
+ * or toolbar; from 0.1.15 its document comes from `renderLoginPageHtml`
+ * here, which shares the admin stylesheet (and so its CSP hash).
  * P05 also ships this file's raw TypeScript source (package.json `files`)
  * alongside the `.astro` pages' compiled exports-map entry, so a host's own
  * Vite build can resolve the pages' `./_shared.js` relative import at build
@@ -24,8 +25,9 @@ import type {
   PaymentProvider,
   PaymentStatus,
 } from '../../types.js';
+import { createHash } from 'node:crypto';
 import { PAYMENT_REQUEST_FORM_ID } from '../payment-constants.js';
-import { escapeHtml } from '../templates.js';
+import { escapeHtml, formatMinorUnits, formatMoney } from '../templates.js';
 
 /**
  * Builds a client-visible /forms-admin URL honoring the host's Astro
@@ -175,11 +177,34 @@ const ADMIN_STYLES = `
   .export-link { margin: 0 0 0.75rem; font-size: 0.9rem; }
   nav[aria-label="Pagination"] { display: flex; gap: 1rem; align-items: center; padding: 0.75rem 0; font-size: 0.9rem; }
   section form { background: #fff; padding: 0.85rem; border-radius: 0.5rem; box-shadow: 0 1px 2px rgba(0,0,0,0.08); margin-bottom: 0.75rem; display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+  .pay-link-input { width: 20rem; max-width: 100%; }
   @media (max-width: 40rem) {
     main { padding: 0.75rem; }
     form.filters { flex-direction: column; align-items: stretch; }
   }
+  body.caf-login { min-height: 100dvh; display: flex; align-items: center; justify-content: center; }
+  .login { width: 100%; max-width: 22rem; margin: 1.5rem; padding: 2rem; background: #fff; border-radius: 0.5rem; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15); box-sizing: border-box; }
+  .login h1 { margin: 0 0 1.25rem; font-size: 1.25rem; }
+  .login label { display: block; margin-bottom: 0.35rem; font-weight: 600; font-size: 0.9rem; }
+  .login input[type='password'] { width: 100%; padding: 0.6rem 0.75rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 0.35rem; box-sizing: border-box; }
+  .login input[type='password']:focus-visible { outline: 2px solid #2563eb; outline-offset: 1px; }
+  .login button { width: 100%; margin-top: 1.25rem; padding: 0.65rem 0.75rem; font-size: 1rem; font-weight: 600; color: #fff; background: #2563eb; border: none; border-radius: 0.35rem; cursor: pointer; }
+  .login button:hover { background: #1d4ed8; }
+  .login button:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; }
+  .login .error { margin: 0 0 1rem; padding: 0.6rem 0.75rem; border-radius: 0.35rem; background: #fef2f2; color: #991b1b; font-size: 0.9rem; }
 `;
+
+/**
+ * CSP source expression for the admin's single inline `<style>` block
+ * (0.1.15): `sha256-<base64>` of the exact bytes `renderAdminPageHtml` and
+ * `renderLoginPageHtml` put between `<style>` and `</style>`. Every admin
+ * page, the login page included, carries this one stylesheet and no other
+ * inline style. The pages register it with `Astro.csp.insertStyleHash` when
+ * the host enabled Astro's `security.csp`, so the admin stays styled under a
+ * hash-based `style-src`. A host with its own CSP header can add
+ * `'<ADMIN_STYLE_HASH>'` to its `style-src` instead.
+ */
+export const ADMIN_STYLE_HASH: `sha256-${string}` = `sha256-${createHash('sha256').update(ADMIN_STYLES, 'utf8').digest('base64')}`;
 
 export interface AdminPageOptions {
   title: string;
@@ -208,7 +233,50 @@ function renderAdminToolbarHtml(trailingSlash: TrailingSlash | undefined): strin
  * response (T-02-24) — belt and suspenders.
  */
 export function renderAdminPageHtml(opts: AdminPageOptions): string {
+  const { start, end } = renderAdminPageParts(opts);
+  return `${start}\n${end}`;
+}
+
+/**
+ * The login page document (0.1.15). Built here rather than in `login.astro`
+ * so it carries the shared admin stylesheet (one hash for every admin page)
+ * instead of an Astro-processed `<style>`, whose minified, cid-scoped bytes
+ * change per build and could never be listed in a host's own CSP header.
+ * No nav and no toolbar: this is the unauthenticated entry point.
+ */
+export function renderLoginPageHtml(opts: { actionUrl: string; hasError: boolean }): string {
   return [
+    '<!doctype html>',
+    '<html lang="en">',
+    '<head>',
+    '<meta charset="utf-8" />',
+    '<meta name="viewport" content="width=device-width, initial-scale=1" />',
+    '<meta name="robots" content="noindex" />',
+    '<title>Admin Login</title>',
+    `<style>${ADMIN_STYLES}</style>`,
+    '</head>',
+    '<body class="caf-login">',
+    '<main class="login">',
+    '<h1>Admin Login</h1>',
+    ...(opts.hasError ? ['<p class="error" role="alert">Incorrect password. Please try again.</p>'] : []),
+    `<form method="post" action="${escapeHtml(opts.actionUrl)}">`,
+    '<label for="password">Password</label>',
+    '<input id="password" name="password" type="password" autocomplete="current-password" required />',
+    '<button type="submit">Sign in</button>',
+    '</form>',
+    '</main>',
+    '</body>',
+    '</html>',
+  ].join('\n');
+}
+
+/**
+ * The same document split after `</main>` (0.1.15), so an `.astro` page can
+ * place an Astro-bundled `<script>` inside `<body>` between the two halves:
+ * `start + '\n' + end` is byte-identical to `renderAdminPageHtml(opts)`.
+ */
+export function renderAdminPageParts(opts: AdminPageOptions): { start: string; end: string } {
+  const start = [
     '<!doctype html>',
     '<html lang="en">',
     '<head>',
@@ -222,9 +290,8 @@ export function renderAdminPageHtml(opts: AdminPageOptions): string {
     renderNavHtml(opts.active, opts.trailingSlash),
     renderAdminToolbarHtml(opts.trailingSlash),
     `<main>${opts.bodyHtml}</main>`,
-    '</body>',
-    '</html>',
   ].join('\n');
+  return { start, end: '</body>\n</html>' };
 }
 
 // ---------------------------------------------------------------------------
@@ -682,7 +749,8 @@ export interface RenderPaymentsTableOptions {
  * Status / Entry (links to `/forms-admin/entries/{entryId}`) / Pay link.
  * EMPTY/ERROR/SUCCESS states all handled here; every link is
  * `adminUrl`-built (checker B1). Amount/Currency are deliberately SEPARATE
- * columns (a raw dollars figure + an ISO code), not a combined
+ * columns (a major-unit figure in the currency's own decimals, via
+ * `formatMinorUnits`, + an ISO code), not a combined
  * currency-formatted string — `formatMoney` (templates.ts) is for
  * human-readable prose contexts (emails, entry-detail rows), not a
  * multi-column data table.
@@ -702,7 +770,8 @@ export function renderPaymentsTableHtml(opts: RenderPaymentsTableOptions): strin
   const rows = payments
     .map((payment) => {
       const created = escapeHtml(new Date(payment.createdAt).toISOString());
-      const amount = payment.amountCents !== undefined ? escapeHtml((payment.amountCents / 100).toFixed(2)) : '';
+      const amount =
+        payment.amountCents !== undefined ? escapeHtml(formatMinorUnits(payment.amountCents, payment.currency ?? 'usd')) : '';
       const currency = escapeHtml((payment.currency ?? '').toUpperCase());
       const provider = escapeHtml(payment.provider ?? '');
       const status = escapeHtml(payment.status ?? '');
@@ -733,4 +802,88 @@ export function renderPaymentsTableHtml(opts: RenderPaymentsTableOptions): strin
   );
 
   return `${filterForm}${table}${pagination}`;
+}
+
+// ---------------------------------------------------------------------------
+// Entry-detail Payments section (0.1.15: moved out of entry-detail.astro so
+// it is unit-testable, the copy control uses data attributes instead of
+// inline handlers, and `payments.adminQuote` / `payments.quoteCurrency`
+// decide what the "take a payment" control is).
+// ---------------------------------------------------------------------------
+
+export type AdminQuoteMode = 'builtin' | 'off' | { href: string };
+
+export interface RenderPaymentsSectionOptions {
+  entryId: string;
+  payments: Payment[];
+  /** Stripe or PayPal is usable server-side (PAY-04); only matters for the built-in form. */
+  providerConfigured: boolean;
+  /** adminUrl-built `/forms-admin/payments/action`. */
+  paymentActionUrl: string;
+  adminQuote: AdminQuoteMode;
+  /** `payments.quoteCurrency`, shown in the built-in form's amount label. */
+  quoteCurrency: string;
+}
+
+/**
+ * One row per payment: status, amount (currency-aware), provider, created,
+ * and for a row with a pay link a read-only input plus a "Copy link" button.
+ * The two are tied by `data-caf-copy-target` and handled by entry-detail's
+ * bundled script: no inline handler or style attribute, so a strict CSP does
+ * not break the control.
+ */
+function renderPaymentRowHtml(payment: Payment): string {
+  const amount = payment.amountCents !== undefined ? formatMoney(payment.amountCents, payment.currency ?? 'usd') : 'n/a';
+  const status = escapeHtml(payment.status ?? 'pending');
+  const provider = escapeHtml(payment.provider ?? 'n/a');
+  const created = escapeHtml(new Date(payment.createdAt).toISOString());
+  const inputId = `caf-pay-link-${payment.id}`;
+  const copyControl = payment.payLinkUrl
+    ? `<input type="text" readonly id="${escapeHtml(inputId)}" class="pay-link-input" value="${escapeHtml(payment.payLinkUrl)}" data-caf-select-on-focus aria-label="Payment link" /> <button type="button" data-caf-copy-target="${escapeHtml(inputId)}">Copy link</button>`
+    : '(no link yet)';
+  return `<li><strong>${status}</strong> — ${escapeHtml(amount)} via ${provider} — ${created}<br />${copyControl}</li>`;
+}
+
+/**
+ * The host quote page link for `{ href }` mode, with `entry=<id>` appended to
+ * whatever query the href already has. The fragment starts at the first `#`
+ * and is kept at the end: a parameter written after it would be part of the
+ * fragment, which the quote page never receives as a query parameter.
+ */
+function quotePageHref(href: string, entryId: string): string {
+  const hashAt = href.indexOf('#');
+  const beforeHash = hashAt === -1 ? href : href.slice(0, hashAt);
+  const hash = hashAt === -1 ? '' : href.slice(hashAt);
+  return `${beforeHash}${beforeHash.includes('?') ? '&' : '?'}entry=${encodeURIComponent(entryId)}${hash}`;
+}
+
+export function renderPaymentsSectionHtml(opts: RenderPaymentsSectionOptions): string {
+  const list =
+    opts.payments.length === 0
+      ? '<p class="state-empty">No payments yet.</p>'
+      : `<ul>${opts.payments.map(renderPaymentRowHtml).join('')}</ul>`;
+
+  if (opts.adminQuote === 'off') return list;
+
+  if (typeof opts.adminQuote === 'object') {
+    return `${list}<p><a href="${escapeHtml(quotePageHref(opts.adminQuote.href, opts.entryId))}">Create a quote</a></p>`;
+  }
+
+  const createForm = opts.providerConfigured
+    ? `<form method="post" action="${escapeHtml(opts.paymentActionUrl)}">
+    <input type="hidden" name="entryId" value="${escapeHtml(opts.entryId)}" />
+    <label for="payment-amount">Amount (${escapeHtml(opts.quoteCurrency.toUpperCase())})</label>
+    <input id="payment-amount" name="amount" type="text" inputmode="decimal" placeholder="200.00" required />
+    <label for="payment-memo">Memo</label>
+    <input id="payment-memo" name="memo" type="text" />
+    <label for="payment-provider">Provider</label>
+    <select id="payment-provider" name="provider">
+      <option value="stripe">Stripe</option>
+      <option value="paypal">PayPal</option>
+    </select>
+    <button type="submit">Create payment link</button>
+  </form>`
+    : '<p class="state-empty">No payment provider is configured — set STRIPE_SECRET_KEY or PAYPAL_CLIENT_ID/PAYPAL_CLIENT_SECRET to enable payment links.</p>';
+
+  return `${list}${createForm}`;
 }

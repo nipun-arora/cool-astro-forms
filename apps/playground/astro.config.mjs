@@ -22,11 +22,20 @@ const port = Number(process.env.PORT ?? 4321);
 // Unset (the default) leaves Astro's own default in place.
 const trailingSlashEnv = process.env.TRAILING_SLASH;
 
+// Astro's Content Security Policy (security.csp) is env-gated the same way:
+// only the dedicated built-server instance that proves the admin pages are
+// CSP-clean (tests/admin-csp.spec.ts, playwright.config.ts's ADMIN_CSP_URL)
+// turns it on. Astro only emits the policy from `astro build` output, never
+// from `astro dev`, so the dev instances would ignore it anyway; the gate
+// keeps every other instance byte-identical regardless.
+const cspEnabled = process.env.CAF_E2E_CSP === 'true';
+
 export default defineConfig({
   output: 'server',
   adapter: node({ mode: 'middleware' }),
   server: { port },
   ...(trailingSlashEnv ? { trailingSlash: trailingSlashEnv } : {}),
+  ...(cspEnabled ? { security: { csp: true } } : {}),
   integrations: [
     coolForms({
       siteId: 'playground',

@@ -42,6 +42,8 @@ function makeConfig(
     payments: {
       payLinkFees: [],
       feeOverrides: 'off',
+      quoteCurrency: 'usd',
+      adminQuote: 'builtin',
       requestPage: { minAmountCents: 100, maxAmountCents: 1_000_000, allowedCurrencies: ['usd'] },
     },
     webhooks: [],
@@ -348,16 +350,43 @@ describe('runRecoverySweep — the unsubscribe link is signed + trailingSlash-aw
     expect(sentData.resumeUrl).toBe('https://example.com');
   });
 
-  it('uses entry.pageUrl as the resume URL when present', async () => {
-    const entry = makeEntry({ pageUrl: '/pricing' });
+  it('uses entry.pageUrl as the resume URL when it is on the site, as an absolute URL (an email link cannot be relative)', async () => {
+    for (const [pageUrl, expected] of [
+      ['/pricing', 'https://example.com/pricing'],
+      ['https://example.com/contact?plan=pro#form', 'https://example.com/contact?plan=pro#form'],
+    ] as const) {
+      const entry = makeEntry({ pageUrl });
+      const storage = makeFakeStorage({ findRecoverableEntries: vi.fn(async () => [entry]) });
+      const send = vi.fn(async (_data: RecoveryEmailData) => undefined);
+
+      await runRecoverySweep(makeDeps({ storage, send }));
+
+      expect((send.mock.calls[0]![0] as RecoveryEmailData).resumeUrl).toBe(expected);
+    }
+  });
+
+  // pageUrl comes from the unauthenticated abandon POST, and a non-browser
+  // client can set any Origin header. Trusting it would let anyone make the
+  // site mail its own "Resume your form" link, from its own address, to any
+  // inbox, pointing anywhere. The sweep only keeps a link on the site's own
+  // origin; checking at send time covers rows stored before this check.
+  it.each([
+    ['another site', 'https://evil.example/example.com/login'],
+    ['a javascript: URL', 'javascript:alert(document.domain)//https://example.com/'],
+    ['a data: URL', 'data:text/html,<script>alert(1)</script>'],
+    ['a protocol-relative URL', '//evil.example/login'],
+    ['a backslash path that browsers read as another host', '/\\evil.example/login'],
+    ['plain http on an https site', 'http://example.com/contact'],
+    ['a lookalike host', 'https://example.com.evil.example/contact'],
+    ['garbage', 'http://['],
+  ])('falls back to config.siteUrl when entry.pageUrl is %s', async (_label, pageUrl) => {
+    const entry = makeEntry({ pageUrl });
     const storage = makeFakeStorage({ findRecoverableEntries: vi.fn(async () => [entry]) });
     const send = vi.fn(async (_data: RecoveryEmailData) => undefined);
-    const deps = makeDeps({ storage, send });
 
-    await runRecoverySweep(deps);
+    await runRecoverySweep(makeDeps({ storage, send }));
 
-    const sentData = send.mock.calls[0]![0] as RecoveryEmailData;
-    expect(sentData.resumeUrl).toBe('/pricing');
+    expect((send.mock.calls[0]![0] as RecoveryEmailData).resumeUrl).toBe('https://example.com');
   });
 });
 

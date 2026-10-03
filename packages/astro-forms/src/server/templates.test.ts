@@ -99,6 +99,27 @@ describe('formatMoney', () => {
   it('never throws for a malformed currency code (falls back to a plain string, no crash)', () => {
     expect(() => formatMoney(20000, '')).not.toThrow();
   });
+
+  // Amounts are Stripe minor units. Intl separates a currency CODE from the
+  // number with a no-break space, so the expectations spell it out.
+  const NBSP = ' ';
+
+  it('renders AED (a code-only currency in en-US) as "AED 2,500.00" from 250000 fils', () => {
+    expect(formatMoney(250000, 'aed')).toBe(`AED${NBSP}2,500.00`);
+    expect(formatMoney(200, 'AED')).toBe(`AED${NBSP}2.00`);
+  });
+
+  it('does not divide a zero-decimal amount by 100: 500 JPY renders as 500 yen, not 5', () => {
+    expect(formatMoney(500, 'jpy')).toBe('¥500');
+  });
+
+  it('divides a three-decimal amount by 1000: 1500 KWD minor units is 1.500 dinar', () => {
+    expect(formatMoney(1500, 'kwd')).toBe(`KWD${NBSP}1.500`);
+  });
+
+  it("follows Stripe's two-decimal representation for ISK: 500 is 5 kronur", () => {
+    expect(formatMoney(500, 'isk')).toBe(`ISK${NBSP}5`);
+  });
 });
 
 describe('renderPaymentQuoteTemplate (PAY-02, W3)', () => {

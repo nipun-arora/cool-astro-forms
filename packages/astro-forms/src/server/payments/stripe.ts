@@ -83,6 +83,13 @@ export interface CreatePaymentLinkResult {
  * webhook (or manual lookup) can trace it back to the originating entry.
  * Payment Links automatically copy top-level metadata onto the resulting
  * Checkout Session, so no duplication into `payment_intent_data` is needed.
+ *
+ * The returned `providerRef` is the LINK id (`plink_…`); the Checkout
+ * Session a payer completes gets its own `cs_…` id at pay time, so the
+ * Stripe webhook matches these rows through `session.payment_link` (0.1.15,
+ * fleet bug F1). `restrictions.completed_sessions.limit: 1` makes Stripe
+ * deactivate the link after its first completed checkout: one quote row, one
+ * payment.
  */
 export async function createPaymentLink(
   input: CreatePaymentLinkInput,
@@ -101,6 +108,7 @@ export async function createPaymentLink(
       },
     ],
     metadata: { entry_id: input.entryId },
+    restrictions: { completed_sessions: { limit: 1 } },
   });
   return { url: link.url, providerRef: link.id };
 }

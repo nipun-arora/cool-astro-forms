@@ -35,6 +35,8 @@ function makeConfig(abandonmentOverrides: Partial<CoolFormsConfig['forms'][strin
     payments: {
       payLinkFees: [],
       feeOverrides: 'off',
+      quoteCurrency: 'usd',
+      adminQuote: 'builtin',
       requestPage: { minAmountCents: 100, maxAmountCents: 1_000_000, allowedCurrencies: ['usd'] },
     },
     webhooks: [],

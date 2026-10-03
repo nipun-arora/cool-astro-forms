@@ -27,6 +27,9 @@
  *     `recordSubmission`'s `defaultDriveConfig()` cannot see the virtual
  *     config module either, so this bridge is how it learns `linkAccess`/
  *     `rootFolderName`/`attachmentFallbackMaxBytes`.
+ *     `CAF_SITE_URL` (0.1.15) rides the same bridge from `cfg.siteUrl`:
+ *     notify.ts compares the From address's domain with it and cannot see
+ *     the virtual config module either.
  *  5. Fires the boot-time `purgeExpired(retentionDays)` retention sweep
  *     exactly once per process (item 11) — never awaited, logged on failure.
  *  6. Fires the lazy lead-recovery sweep (`maybeRunRecoverySweep`,
@@ -82,6 +85,7 @@ export function registerRuntimeConfig(cfg: CoolFormsConfig): void {
   process.env.CAF_DRIVE_LINK_ACCESS = cfg.drive.linkAccess;
   process.env.CAF_DRIVE_ROOT_FOLDER = cfg.drive.rootFolderName;
   process.env.CAF_DRIVE_FALLBACK_MAX_BYTES = String(cfg.drive.attachmentFallbackMaxBytes);
+  process.env.CAF_SITE_URL = cfg.siteUrl;
   registerWebhookTargets(cfg.webhooks ?? []);
 
   if (bootPurgeRan) return;

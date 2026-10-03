@@ -621,6 +621,7 @@ export class TursoStorage implements StorageAdapter {
     const client = await this.#ready;
     const id = ulid();
     const now = Date.now();
+    const providerRef = (payment.providerRef as string | undefined) ?? null;
     const args: Arg[] = [
       id,
       entryId,
@@ -629,15 +630,21 @@ export class TursoStorage implements StorageAdapter {
       (payment.currency as string | undefined) ?? null,
       (payment.status as string | undefined) ?? null,
       (payment.payLinkUrl as string | undefined) ?? null,
-      (payment.providerRef as string | undefined) ?? null,
+      providerRef,
       payment.providerIds !== undefined ? JSON.stringify(payment.providerIds) : null,
       payment.events !== undefined ? JSON.stringify(payment.events) : null,
       now,
       now,
+      providerRef,
+      providerRef,
     ];
+    // One statement: the "no row has this providerRef yet" check and the
+    // insert run together on the server, so two writers over the network
+    // cannot both pass the check (see the adapter docstring).
     await client.execute({
       sql: `INSERT INTO payments (id, entry_id, provider, amount_cents, currency, status, pay_link_url, provider_ref, provider_ids, events, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+            SELECT ?,?,?,?,?,?,?,?,?,?,?,?
+            WHERE ? IS NULL OR NOT EXISTS (SELECT 1 FROM payments WHERE provider_ref = ?)`,
       args,
     });
   }

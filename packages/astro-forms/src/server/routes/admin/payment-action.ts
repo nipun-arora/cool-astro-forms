@@ -28,6 +28,7 @@ import { createPaymentLink } from '../../payments/stripe.js';
 import { isSameOrigin } from '../../security/origin-check.js';
 import { getStorageAdapter } from '../../storage/index.js';
 import { adminUrl } from '../../admin/_shared.js';
+import { z } from 'zod';
 
 export const prerender = false;
 
@@ -37,8 +38,20 @@ type ConfigWithTemplates = typeof config & { templates?: CafTemplates };
 
 type PaymentProviderChoice = 'stripe' | 'paypal';
 
-/** The admin quote-flow never applies fee lines to an owner-set amount — always USD unless a future plan adds a currency selector to the create-payment-link form. */
-const DEFAULT_CURRENCY = 'usd';
+/**
+ * The admin quote flow never applies fee lines to an owner-set amount. Its
+ * currency is `payments.quoteCurrency` (0.1.15; it was a hardcoded 'usd').
+ * The `?? 'usd'` keeps the pre-0.1.15 behaviour for any config object that
+ * reaches this route without the parsed default.
+ */
+function quoteCurrency(): string {
+  return config.payments?.quoteCurrency ?? 'usd';
+}
+
+/** False when the host set `payments.adminQuote` to 'off' or to its own `{ href }` page. */
+function builtinQuoteEnabled(): boolean {
+  return (config.payments?.adminQuote ?? 'builtin') === 'builtin';
+}
 
 /** Reads a form-urlencoded/multipart or JSON body into a flat string map. Never throws. Mirrors entry-action.ts's own helper (each admin action route keeps its own small copy — no shared body-parsing module exists yet). */
 async function extractFields(request: Request): Promise<Record<string, string>> {
@@ -65,17 +78,33 @@ function badRequest(): Response {
 /** Same email-detection convention as handle-abandon.ts's hasValidEmailOrPhone (a key name containing "email"). Used to find the entry's captured address to send the quote to; falls back to the form's configured notifyTo. */
 const EMAIL_KEY_PATTERN = /email/i;
 
+/**
+ * The first field whose key contains "email" and whose value is ONE valid
+ * address (the same `z.email()` check as recovery/sweep.ts's
+ * resolveVisitorEmail). The value came from the visitor and becomes the
+ * quote email's `to`: nodemailer reads a comma list as several recipients
+ * and a CR/LF value as an address group, so anything that is not a single
+ * address is skipped.
+ */
 function extractEntryEmail(fields: Record<string, unknown>): string | undefined {
   for (const [key, value] of Object.entries(fields)) {
     if (typeof value !== 'string') continue;
     const trimmed = value.trim();
-    if (trimmed && EMAIL_KEY_PATTERN.test(key)) return trimmed;
+    if (trimmed && EMAIL_KEY_PATTERN.test(key) && z.email().safeParse(trimmed).success) return trimmed;
   }
   return undefined;
 }
 
 export const POST: APIRoute = async ({ request }) => {
   const trailingSlash = (config as ConfigWithTrailingSlash).trailingSlash;
+
+  // 0.1.15: a host that turned the built-in flow off (or replaced it with
+  // its own quote page) gets no route at all. The integration also stops
+  // injecting it; this guard covers a stale build or a direct import.
+  if (!builtinQuoteEnabled()) {
+    return new Response(null, { status: 404 });
+  }
+  const currency = quoteCurrency();
 
   // 1. CSRF (T-03-24) — the ONLY origin protection this route gets of its
   // own; the auth session guard already covers this whole path prefix.
@@ -111,7 +140,7 @@ export const POST: APIRoute = async ({ request }) => {
     let link: { url: string; providerRef: string } | undefined;
 
     if (provider === 'stripe') {
-      const result = await createPaymentLink({ amountCents, currency: DEFAULT_CURRENCY, memo, entryId });
+      const result = await createPaymentLink({ amountCents, currency, memo, entryId });
       link = { url: result.url, providerRef: result.providerRef };
     } else if (paypalConfigured()) {
       // No dedicated payment-confirmation page exists in this plan's scope
@@ -122,7 +151,7 @@ export const POST: APIRoute = async ({ request }) => {
       const returnUrl = `${config.siteUrl}${adminUrl('/', trailingSlash)}`;
       const order = await createOrder({
         totalCents: amountCents,
-        currency: DEFAULT_CURRENCY,
+        currency,
         entryId,
         returnUrl,
         cancelUrl: returnUrl,
@@ -141,7 +170,7 @@ export const POST: APIRoute = async ({ request }) => {
     await storage.attachPayment(entryId, {
       provider,
       amountCents,
-      currency: DEFAULT_CURRENCY,
+      currency,
       status: 'link_created',
       payLinkUrl: link.url,
       providerRef: link.providerRef,
@@ -159,7 +188,7 @@ export const POST: APIRoute = async ({ request }) => {
           formId: entry.formId,
           notifyTo,
           amountCents,
-          currency: DEFAULT_CURRENCY,
+          currency,
           memo,
           payLinkUrl: link.url,
         },

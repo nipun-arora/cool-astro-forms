@@ -112,7 +112,13 @@ function computeStartedEndpoint(trailingSlash: 'always' | 'never' | 'ignore' | u
 function cafConfigVirtualPlugin(
   config: CoolFormsConfig,
   trailingSlash: 'always' | 'never' | 'ignore' | undefined,
+  cspEnabled: boolean,
 ): Plugin {
+  // `cspEnabled` (0.1.15) mirrors the host's `security.csp`: the admin pages
+  // register their inline style hash with `Astro.csp` only when it is true,
+  // because reading `Astro.csp` on a host without CSP logs a warning on
+  // every production request.
+  const extras = `trailingSlash:${JSON.stringify(trailingSlash)}, cspEnabled:${JSON.stringify(cspEnabled)}`;
   return {
     name: 'cool-astro-forms:config',
     resolveId(id) {
@@ -124,12 +130,18 @@ function cafConfigVirtualPlugin(
       if (config.templatesModule) {
         return [
           `import templates from ${JSON.stringify(config.templatesModule)};`,
-          `export default { ...${JSON.stringify(config)}, templates, trailingSlash:${JSON.stringify(trailingSlash)} };`,
+          `export default { ...${JSON.stringify(config)}, templates, ${extras} };`,
         ].join('\n');
       }
-      return `export default { ...${JSON.stringify(config)}, trailingSlash:${JSON.stringify(trailingSlash)} };`;
+      return `export default { ...${JSON.stringify(config)}, ${extras} };`;
     },
   };
+}
+
+/** True when the host turned on Astro's Content Security Policy (`security.csp: true` or an options object). */
+function hostCspEnabled(astroConfig: { security?: { csp?: unknown } }): boolean {
+  const csp = astroConfig.security?.csp;
+  return csp === true || (typeof csp === 'object' && csp !== null);
 }
 
 /**
@@ -263,10 +275,14 @@ export default function coolForms(userConfig: unknown): AstroIntegration {
           });
           // Admin quote-flow (PAY-01/PAY-02) sits under the guarded
           // /forms-admin/* prefix alongside the other admin action routes.
-          injectRoute({
-            pattern: '/forms-admin/payments/action',
-            entrypoint: 'cool-astro-forms/server/routes/admin/payment-action.js',
-          });
+          // Skipped (0.1.15) when the host set `payments.adminQuote` to 'off'
+          // or to its own `{ href }` quote page.
+          if (config.payments.adminQuote === 'builtin') {
+            injectRoute({
+              pattern: '/forms-admin/payments/action',
+              entrypoint: 'cool-astro-forms/server/routes/admin/payment-action.js',
+            });
+          }
         }
 
         if (stripeActive) {
@@ -335,7 +351,7 @@ export default function coolForms(userConfig: unknown): AstroIntegration {
             // kept external from the host's SSR bundle alongside
             // better-sqlite3 so the host build never tries to bundle it.
             ssr: { external: ['better-sqlite3', 'stripe'] },
-            plugins: [cafConfigVirtualPlugin(config, astroConfig.trailingSlash)],
+            plugins: [cafConfigVirtualPlugin(config, astroConfig.trailingSlash, hostCspEnabled(astroConfig))],
           },
         });
 

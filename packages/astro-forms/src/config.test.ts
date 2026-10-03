@@ -97,6 +97,77 @@ describe('parseConfig — payments.feeOverrides (fee-selector opt-in)', () => {
   });
 });
 
+/**
+ * 0.1.15: the built-in admin "Create payment link" flow. `quoteCurrency`
+ * replaces a hardcoded USD (default stays 'usd' so an existing host's upgraded
+ * config charges exactly what it did), and `adminQuote` lets a host hide the
+ * control or send the desk to its own quote page.
+ */
+describe('parseConfig — payments.quoteCurrency + payments.adminQuote (0.1.15)', () => {
+  it("defaults quoteCurrency to 'usd' and adminQuote to 'builtin', so an existing config's quote flow is unchanged", () => {
+    const parsed = parseConfig(baseConfig());
+    expect(parsed.payments.quoteCurrency).toBe('usd');
+    expect(parsed.payments.adminQuote).toBe('builtin');
+    const withFees = parseConfig(baseConfig({ payments: { payLinkFees: [] } }));
+    expect(withFees.payments.quoteCurrency).toBe('usd');
+    expect(withFees.payments.adminQuote).toBe('builtin');
+  });
+
+  it('lowercases a configured quoteCurrency (Stripe wants lowercase codes)', () => {
+    expect(parseConfig(baseConfig({ payments: { quoteCurrency: 'AED' } })).payments.quoteCurrency).toBe('aed');
+  });
+
+  it('rejects a zero- or three-decimal quoteCurrency: the quote form reads "200.50" as 20050 minor units, which would charge 100x for JPY', () => {
+    expect(() => parseConfig(baseConfig({ payments: { quoteCurrency: 'jpy' } }))).toThrow(/two-decimal/);
+    expect(() => parseConfig(baseConfig({ payments: { quoteCurrency: 'kwd' } }))).toThrow(/two-decimal/);
+    expect(() => parseConfig(baseConfig({ payments: { quoteCurrency: 'usdx' } }))).toThrow();
+  });
+
+  it("accepts adminQuote 'off' and { href } (a path or an http(s) URL)", () => {
+    expect(parseConfig(baseConfig({ payments: { adminQuote: 'off' } })).payments.adminQuote).toBe('off');
+    expect(
+      parseConfig(baseConfig({ payments: { adminQuote: { href: '/forms-admin/quote/' } } })).payments.adminQuote,
+    ).toEqual({ href: '/forms-admin/quote/' });
+    expect(
+      parseConfig(baseConfig({ payments: { adminQuote: { href: 'https://desk.example.com/quote' } } })).payments
+        .adminQuote,
+    ).toEqual({ href: 'https://desk.example.com/quote' });
+  });
+
+  it('rejects an adminQuote href that is not a path or an http(s) URL (no javascript: links in the admin)', () => {
+    expect(() => parseConfig(baseConfig({ payments: { adminQuote: { href: 'javascript:alert(1)' } } }))).toThrow();
+    expect(() => parseConfig(baseConfig({ payments: { adminQuote: { href: '//evil.example/x' } } }))).toThrow();
+    expect(() => parseConfig(baseConfig({ payments: { adminQuote: 'on' } }))).toThrow();
+  });
+});
+
+/**
+ * A site-path href must stay on the site. Browsers read a backslash as a
+ * slash and drop ASCII tab, CR and LF anywhere in a URL, so '/\\evil.com' and
+ * '/<TAB>/evil.com' both resolve like '//evil.com': a "Create a quote" link
+ * to another origin, carrying the entry id. The check is the browser's own
+ * resolution, not a prefix test.
+ */
+describe('parseConfig — adminQuote.href never leaves the site through a path that a browser reads as protocol-relative', () => {
+  it.each([
+    ['a backslash after the slash', '/\\evil.com/q'],
+    ['a slash then a backslash', '/\\/evil.com'],
+    ['a tab between the slashes', '/\t/evil.com'],
+    ['a line feed between the slashes', '/\n/evil.com'],
+    ['a carriage return between the slashes', '/\r/evil.com'],
+  ])('rejects %s', (_label, href) => {
+    // The premise, checked: a browser resolves this path to another origin.
+    expect(new URL(href, 'https://tours.example/forms-admin/entries/e1').origin).not.toBe('https://tours.example');
+    expect(() => parseConfig(baseConfig({ payments: { adminQuote: { href } } }))).toThrow(/adminQuote\.href/);
+  });
+
+  it('still accepts ordinary site paths, with or without a query', () => {
+    for (const href of ['/forms-admin/quote/', '/quote?src=admin', '/desk/quote.html']) {
+      expect(parseConfig(baseConfig({ payments: { adminQuote: { href } } })).payments.adminQuote).toEqual({ href });
+    }
+  });
+});
+
 describe('parseConfig — webhooks subtree (Phase 3)', () => {
   it('accepts a valid webhook target', () => {
     const parsed = parseConfig(

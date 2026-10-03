@@ -1,6 +1,6 @@
 {
   "name": "cool-astro-forms",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "type": "module",
   "license": "MIT",
   "description": "The lead-ops platform for Astro forms: abandonment capture, recovery emails, quote payments, and a self-hosted admin. No external services, just SQLite and SMTP. MIT.",
@@ -205,7 +205,7 @@
   },
   "peerDependencies": {
     "@libsql/client": "^0.17.0",
-    "astro": "^6.0.0 || ^7.0.0"
+    "astro": "^7.2.8"
   },
   "peerDependenciesMeta": {
     "@libsql/client": {

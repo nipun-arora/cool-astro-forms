@@ -11,8 +11,8 @@
   },
   "dependencies": {
     "cool-astro-forms": "*",
-    "astro": "^6.4.8",
-    "@astrojs/node": "^10.1.0"
+    "astro": "7.2.9",
+    "@astrojs/node": "11.1.4"
   },
   "devDependencies": {
     "express": "^5.2.1",

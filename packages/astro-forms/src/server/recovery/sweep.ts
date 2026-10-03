@@ -41,7 +41,7 @@ import { z } from 'zod';
 import type { CoolFormsConfig } from '../../config.js';
 import type { Entry } from '../../types.js';
 import { logError } from '../log.js';
-import { sendRecoveryEmail, type RecoveryEmailData } from '../notify.js';
+import { sendRecoveryEmail, type CafTemplates, type RecoveryEmailData } from '../notify.js';
 import type { StorageAdapter } from '../storage/adapter.js';
 import { BATCH_LIMIT, RECOVERY_SWEEP_INTERVAL_MS } from '../drive-recovery-constants.js';
 import { recoveryDisabledFormIds } from './resolve.js';
@@ -54,7 +54,11 @@ export interface RecoverySweepDeps {
   storage: StorageAdapter;
   config: ConfigWithTrailingSlash;
   now?: () => number;
-  /** Defaults to notify.ts's sendRecoveryEmail — injectable for tests (network-free). */
+  /**
+   * Defaults to notify.ts's sendRecoveryEmail with the host's
+   * `templates.recovery` override (when its `templatesModule` exports one) —
+   * injectable for tests (network-free).
+   */
   send?: (data: RecoveryEmailData) => Promise<unknown>;
   /** Defaults to unsubscribe-token.ts's resolveRecoverySecret — injectable for tests. */
   resolveSecret?: (dbPath: string) => string;
@@ -89,6 +93,27 @@ function resolveVisitorEmail(fields: Record<string, unknown>): string | undefine
 }
 
 /**
+ * The "Resume your form" link. `pageUrl` arrives in the unauthenticated
+ * abandon POST, and a client outside a browser can send any Origin header,
+ * so it is used only when it resolves (against `siteUrl`, which also turns a
+ * relative path into the absolute link an email needs) to an http(s) URL on
+ * the site's own origin. Anything else (another host, `javascript:`,
+ * `data:`, a protocol-relative or backslash path, garbage) falls back to
+ * `siteUrl`. Checked at send time so rows stored before 0.1.15 are covered.
+ */
+function safeResumeUrl(pageUrl: string | undefined, siteUrl: string): string {
+  if (!pageUrl) return siteUrl;
+  try {
+    const site = new URL(siteUrl);
+    const page = new URL(pageUrl, site);
+    if ((page.protocol === 'https:' || page.protocol === 'http:') && page.origin === site.origin) return page.href;
+  } catch {
+    // Unparseable: fall through to the site URL.
+  }
+  return siteUrl;
+}
+
+/**
  * Builds the client-visible unsubscribe endpoint (mirrors integration.ts's
  * `computeAbandonEndpoint` trailingSlash-aware reasoning — checker B1 /
  * LESSONS #3 third-strike class): a hardcoded slashless path 404s on a host
@@ -117,7 +142,10 @@ export async function runRecoverySweep(deps: RecoverySweepDeps): Promise<void> {
   if (!config.recovery.enabled) return;
 
   const now = deps.now ? deps.now() : Date.now();
-  const send = deps.send ?? sendRecoveryEmail;
+  // 0.1.15: the virtual config carries the resolved `templatesModule` export
+  // as `templates`; until this release `recovery` was typed but never read.
+  const recoveryTemplate = (config as ConfigWithTrailingSlash & { templates?: CafTemplates }).templates?.recovery;
+  const send = deps.send ?? ((data: RecoveryEmailData) => sendRecoveryEmail(data, { template: recoveryTemplate }));
   const resolveSecret = deps.resolveSecret ?? resolveRecoverySecret;
   // 04-10: built once per pass — the set of form ids a per-form override has
   // turned off. Consulted BEFORE resolveVisitorEmail/markRecoverySent below.
@@ -154,7 +182,7 @@ export async function runRecoverySweep(deps: RecoverySweepDeps): Promise<void> {
 
     const token = signUnsubscribeToken(entry.visitorUuid, secret);
     const unsubscribeUrl = `${unsubscribeEndpoint}?token=${token}`;
-    const resumeUrl = entry.pageUrl ?? config.siteUrl;
+    const resumeUrl = safeResumeUrl(entry.pageUrl, config.siteUrl);
 
     await send({
       to: email,

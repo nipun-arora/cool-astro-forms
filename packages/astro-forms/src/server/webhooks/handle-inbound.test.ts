@@ -371,3 +371,157 @@ describe('handleInboundPayment — no manual events[] read-check-write (checker 
     expect(result).toEqual({ status: 200 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// 0.1.15 — provider-confirmed settlement (Stripe: payment_status,
+// amount_total, currency). Before this, a validly signed completion flipped
+// the row to paid on its event type alone: an unpaid session (a delayed
+// payment method) or a session for a different amount was recorded as paid
+// money. Now the stored row is the contract and the event must match it.
+// ---------------------------------------------------------------------------
+
+describe('handleInboundPayment — settlement check (0.1.15)', () => {
+  const PAID = { paid: true, amountCents: 2000, currency: 'usd' };
+
+  it('flips to paid when the provider says paid AND the amount and currency equal the stored row', async () => {
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const deps = makeDeps({ storage: makeFakeStorage({ appendPaymentEventIfAbsent }) });
+
+    const result = await handleInboundPayment({ ...BASE_INPUT, settlement: PAID }, deps);
+
+    expect(result).toEqual({ status: 200 });
+    expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), { status: 'paid' });
+    expect(deps.notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('compares the currency case-insensitively (Stripe sends lowercase; a host may have stored "AED")', async () => {
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const storage = makeFakeStorage({
+      appendPaymentEventIfAbsent,
+      getPaymentByProviderRef: vi.fn(async () => makePayment({ currency: 'AED', amountCents: 250000 })),
+    });
+    const deps = makeDeps({ storage });
+
+    await handleInboundPayment({ ...BASE_INPUT, settlement: { paid: true, amountCents: 250000, currency: 'aed' } }, deps);
+
+    expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), { status: 'paid' });
+  });
+
+  it.each([
+    ['not-paid', { paid: false, amountCents: 2000, currency: 'usd' }],
+    ['amount', { paid: true, amountCents: 1999, currency: 'usd' }],
+    ['currency', { paid: true, amountCents: 2000, currency: 'eur' }],
+    ['amount', { paid: true, amountCents: null, currency: 'usd' }],
+  ] as const)(
+    'reason %s: records the event WITHOUT the paid patch, logs webhook.settlement-mismatch, and sends no email, no outbound webhook, no entry flip',
+    async (reason, settlement) => {
+      const appendPaymentEventIfAbsent = vi.fn(async () => true);
+      const storage = makeFakeStorage({ appendPaymentEventIfAbsent });
+      const deps = makeDeps({ storage });
+
+      const result = await handleInboundPayment({ ...BASE_INPUT, settlement }, deps);
+
+      expect(result).toEqual({ status: 200 });
+      expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), undefined);
+      expect(deps.log).toHaveBeenCalledWith(
+        'webhook.settlement-mismatch',
+        expect.objectContaining({
+          reason,
+          paymentId: 'payment-1',
+          eventId: 'evt_1',
+          expected: { amountCents: 2000, currency: 'usd' },
+        }),
+      );
+      expect(deps.notify).not.toHaveBeenCalled();
+      expect(deps.deliver).not.toHaveBeenCalled();
+      expect(storage.updateEntry).not.toHaveBeenCalled();
+    },
+  );
+
+  it('a stored row with no amount never verifies (nothing to compare against is not a match)', async () => {
+    const storage = makeFakeStorage({
+      getPaymentByProviderRef: vi.fn(async () => makePayment({ amountCents: undefined })),
+    });
+    const deps = makeDeps({ storage });
+
+    await handleInboundPayment({ ...BASE_INPUT, settlement: PAID }, deps);
+
+    expect(deps.notify).not.toHaveBeenCalled();
+    expect(deps.log).toHaveBeenCalledWith('webhook.settlement-mismatch', expect.objectContaining({ reason: 'amount' }));
+  });
+
+  it('a duplicate delivery of a mismatched event is still a no-op (the same atomic gate)', async () => {
+    const storage = makeFakeStorage({ appendPaymentEventIfAbsent: vi.fn(async () => false) });
+    const deps = makeDeps({ storage });
+
+    await handleInboundPayment({ ...BASE_INPUT, settlement: { paid: false, amountCents: 2000, currency: 'usd' } }, deps);
+
+    expect(deps.log).toHaveBeenCalledWith('webhook.duplicate-event', expect.anything());
+    expect(deps.log).not.toHaveBeenCalledWith('webhook.settlement-mismatch', expect.anything());
+  });
+
+  it('checkout.session.async_payment_succeeded is a completed event: a delayed method that settles later flips the row once it is paid', async () => {
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const deps = makeDeps({ storage: makeFakeStorage({ appendPaymentEventIfAbsent }) });
+
+    await handleInboundPayment(
+      { ...BASE_INPUT, eventId: 'evt_async', eventType: 'checkout.session.async_payment_succeeded', settlement: PAID },
+      deps,
+    );
+
+    expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_async', expect.anything(), {
+      status: 'paid',
+    });
+    expect(deps.notify).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.1.15 — fleet bug F1. The admin "Create payment link" flow stores the
+// Payment Link id (plink_…) because the Checkout Session id does not exist
+// until someone pays; the webhook carries the session id (cs_…). Without the
+// alternate lookup those payments were acked as unknown and never marked
+// paid, and nobody was emailed.
+// ---------------------------------------------------------------------------
+
+describe('handleInboundPayment — alternate provider ref (payment link, F1)', () => {
+  it('when the session id matches no row, finds the row by the payment link id and flips it', async () => {
+    const getPaymentByProviderRef = vi.fn(async (ref: string) =>
+      ref === 'plink_1' ? makePayment({ providerRef: 'plink_1' }) : undefined,
+    );
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const deps = makeDeps({ storage: makeFakeStorage({ getPaymentByProviderRef, appendPaymentEventIfAbsent }) });
+
+    const result = await handleInboundPayment({ ...BASE_INPUT, alternateProviderRef: 'plink_1' }, deps);
+
+    expect(result).toEqual({ status: 200 });
+    expect(getPaymentByProviderRef).toHaveBeenNthCalledWith(1, 'cs_test_1');
+    expect(getPaymentByProviderRef).toHaveBeenNthCalledWith(2, 'plink_1');
+    expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), { status: 'paid' });
+    expect(deps.notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('never consults the alternate ref when the session id already matches a row', async () => {
+    const getPaymentByProviderRef = vi.fn(async () => makePayment());
+    const deps = makeDeps({ storage: makeFakeStorage({ getPaymentByProviderRef }) });
+
+    await handleInboundPayment({ ...BASE_INPUT, alternateProviderRef: 'plink_1' }, deps);
+
+    expect(getPaymentByProviderRef).toHaveBeenCalledTimes(1);
+  });
+
+  it('when neither ref matches, acks 200 and logs both refs as unknown', async () => {
+    const storage = makeFakeStorage({ getPaymentByProviderRef: vi.fn(async () => undefined) });
+    const deps = makeDeps({ storage });
+
+    const result = await handleInboundPayment({ ...BASE_INPUT, alternateProviderRef: 'plink_9' }, deps);
+
+    expect(result).toEqual({ status: 200 });
+    expect(deps.log).toHaveBeenCalledWith('webhook.unknown-ref', {
+      providerRef: 'cs_test_1',
+      alternateProviderRef: 'plink_9',
+      provider: 'stripe',
+    });
+    expect(storage.appendPaymentEventIfAbsent).not.toHaveBeenCalled();
+  });
+});

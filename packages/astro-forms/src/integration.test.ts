@@ -214,6 +214,24 @@ describe('coolForms', () => {
       expect(loaded).toContain('import templates from');
     });
 
+    // 0.1.15: the admin pages register their inline style hash with
+    // Astro.csp only when the host turned Astro's CSP on; calling Astro.csp
+    // without it logs a production warning on every admin request.
+    it('carries cspEnabled:true when the host set security.csp (boolean or object form)', () => {
+      for (const csp of [true, { directives: ["default-src 'self'"] }]) {
+        const plugin = getPlugin(validUserConfig(), { security: { csp } } as never);
+        const loaded = plugin.load(plugin.resolveId('virtual:cool-astro-forms/config')) as string;
+        expect(loaded).toContain('cspEnabled:true');
+      }
+    });
+
+    it('carries cspEnabled:false when security.csp is absent or false, with or without templatesModule', () => {
+      const plain = getPlugin();
+      expect(plain.load(plain.resolveId('virtual:cool-astro-forms/config')) as string).toContain('cspEnabled:false');
+      const off = getPlugin(validUserConfig({ templatesModule: './t.js' }), { security: { csp: false } } as never);
+      expect(off.load(off.resolveId('virtual:cool-astro-forms/config')) as string).toContain('cspEnabled:false');
+    });
+
     it('carries an undefined trailingSlash when the host has none configured', () => {
       const plugin = getPlugin();
       const resolved = plugin.resolveId('virtual:cool-astro-forms/config');
@@ -514,6 +532,21 @@ describe('coolForms', () => {
       // 13 base + 4 paymentsActive-gated + 1 stripeActive-gated + 2 paypalActive-gated
       expect(injectRoute).toHaveBeenCalledTimes(20);
     });
+
+    it.each([['off'], [{ href: '/forms-admin/quote/' }]])(
+      'with STRIPE_SECRET_KEY set and payments.adminQuote %j, does NOT inject /forms-admin/payments/action (0.1.15) but keeps the webhook and pay routes',
+      (adminQuote) => {
+        delete process.env.PAYPAL_CLIENT_ID;
+        delete process.env.PAYPAL_CLIENT_SECRET;
+        process.env.STRIPE_SECRET_KEY = 'sk_test_dummy';
+        const { injectRoute } = runSetupHook(validUserConfig({ payments: { adminQuote } }));
+        const patterns = injectedPatterns(injectRoute);
+        expect(patterns).not.toContain('/forms-admin/payments/action');
+        expect(patterns).toContain('/api/forms/webhooks/stripe');
+        expect(patterns).toContain('/forms-pay');
+        expect(injectRoute).toHaveBeenCalledTimes(17);
+      },
+    );
 
     it('ssr.external contains stripe alongside better-sqlite3', () => {
       const { updateConfig } = runSetupHook();

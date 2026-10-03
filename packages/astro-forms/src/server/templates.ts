@@ -4,6 +4,7 @@
  * `templatesModule` override (see notify.ts's NotifyOptions.template seam).
  */
 import type { FeeBreakdown, ServerJourneyStep } from '../types.js';
+import { minorUnitExponent } from './money.js';
 import type {
   AbandonedLeadEmailData,
   NotifyTemplateResult,
@@ -16,6 +17,12 @@ import type {
  * Escapes &, <, >, ", ' for safe interpolation into HTML. Exported for reuse
  * by Phase 2 admin views (review T-01-36) — every interpolated value in the
  * html output of this module passes through this helper.
+ *
+ * It keeps a value inside its attribute or text node; it does not make a
+ * URL safe. A `javascript:` or `data:` value in an `href` survives it
+ * unchanged, so check the scheme and origin of any URL before linking it
+ * (the package checks the URLs it passes to templates, such as the
+ * recovery `resumeUrl`).
  */
 export function escapeHtml(value: unknown): string {
   const str = value === null || value === undefined ? '' : String(value);
@@ -150,19 +157,34 @@ export function defaultAbandonedLeadTemplate(data: AbandonedLeadEmailData): Noti
 // ---------------------------------------------------------------------------
 
 /**
- * Formats cents as a locale-aware currency string (e.g. 20000/'usd' ->
- * "$200.00"). Reused by the payment email templates and the admin
- * entry-detail payments section — never re-implemented per-caller. Falls
- * back to a plain "<dollars> <CODE>" string for a currency code
- * `Intl.NumberFormat` rejects as malformed — never throws.
+ * Formats a stored amount (the currency's smallest unit, as Stripe takes it)
+ * as a currency string: 20000/'usd' -> "$200.00", 250000/'aed' ->
+ * "AED 2,500.00", 500/'jpy' -> "¥500", 1500/'kwd' -> "KWD 1.500". The
+ * divisor comes from `minorUnitExponent` (money.ts), so zero- and
+ * three-decimal currencies are not shown 100x or 10x off. Reused by the
+ * payment email templates and the admin entry-detail payments section, and
+ * exported from `cool-astro-forms/server` for host templates. Falls back to a
+ * plain "<amount> <CODE>" string for a currency code `Intl.NumberFormat`
+ * rejects as malformed — never throws.
  */
 export function formatMoney(amountCents: number, currency: string): string {
-  const dollars = amountCents / 100;
+  const exponent = minorUnitExponent(currency);
+  const major = amountCents / 10 ** exponent;
   try {
-    return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase() }).format(dollars);
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency.toUpperCase() }).format(major);
   } catch {
-    return `${dollars.toFixed(2)} ${currency.toUpperCase()}`;
+    return `${major.toFixed(exponent)} ${currency.toUpperCase()}`;
   }
+}
+
+/**
+ * The stored amount as a plain major-unit number string with the currency's
+ * own decimals and no symbol ("200.00" for 20000 usd, "500" for 500 jpy):
+ * the admin payments table shows amount and currency in separate columns.
+ */
+export function formatMinorUnits(amountCents: number, currency: string): string {
+  const exponent = minorUnitExponent(currency);
+  return (amountCents / 10 ** exponent).toFixed(exponent);
 }
 
 /** One row of a rendered payment breakdown — label + already-money-formatted amount string. */

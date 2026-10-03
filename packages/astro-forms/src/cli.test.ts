@@ -34,6 +34,10 @@ const FULL_ENV_INVENTORY = [
   'EMAIL_PORT',
   'EMAIL_USER',
   'EMAIL_PASS',
+  // 0.1.15: relay mode and the sender address/name.
+  'EMAIL_AUTH',
+  'EMAIL_FROM',
+  'EMAIL_FROM_NAME',
   'GEO_PROVIDER',
   'TURNSTILE_SITE_KEY',
   'TURNSTILE_SECRET_KEY',

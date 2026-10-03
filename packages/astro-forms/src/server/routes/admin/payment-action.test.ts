@@ -106,6 +106,7 @@ describe('POST /forms-admin/payments/action', () => {
     getEntryByIdMock.mockResolvedValue(undefined);
     (config as { trailingSlash?: 'always' | 'never' | 'ignore' }).trailingSlash = undefined;
     (config as { templates?: { paymentQuote?: unknown } }).templates = undefined;
+    (config as { payments?: unknown }).payments = undefined;
   });
 
   it('rejects a cross-origin POST with 403 before dispatching any storage call', async () => {
@@ -190,6 +191,34 @@ describe('POST /forms-admin/payments/action', () => {
     expect((emailData as { notifyTo: string }).notifyTo).toBe('fallback@example.com');
   });
 
+  // The entry's fields come from the visitor. A comma list makes nodemailer
+  // send to several recipients, and a CR/LF value is read as an address
+  // group that delivers only to the injected address. Neither is an email
+  // address, so the quote goes to the configured notifyTo instead.
+  it.each([
+    ['a comma separated list', 'client@example.com, extra@evil.example'],
+    ['a CR/LF header payload', 'client@example.com\r\nBcc: x@evil.example'],
+    ['a display name group', '"client@example.com" <x@evil.example>'],
+    ['not an address at all', 'call me'],
+  ])('never sends the quote to an entry email that is %s: falls back to the form notifyTo', async (_label, value) => {
+    getEntryByIdMock.mockResolvedValueOnce(makeEntry({ fields: { email: value } }));
+    const res = await callPost({ entryId: 'e1', provider: 'stripe', amount: '200' });
+
+    expect(res.status).toBe(302);
+    const [emailData] = sendPaymentQuoteEmailMock.mock.calls[0]!;
+    expect((emailData as { notifyTo: string }).notifyTo).toBe('fallback@example.com');
+  });
+
+  it('skips an invalid email field and uses a later valid one', async () => {
+    getEntryByIdMock.mockResolvedValueOnce(
+      makeEntry({ fields: { email: 'a@example.com, b@evil.example', work_email: ' jane@example.com ' } }),
+    );
+    await callPost({ entryId: 'e1', provider: 'stripe', amount: '200' });
+
+    const [emailData] = sendPaymentQuoteEmailMock.mock.calls[0]!;
+    expect((emailData as { notifyTo: string }).notifyTo).toBe('jane@example.com');
+  });
+
   it('paypal happy path: creates the order, attaches a link_created payment with the approval URL, and 302s back', async () => {
     getEntryByIdMock.mockResolvedValueOnce(makeEntry());
     const res = await callPost({ entryId: 'e1', provider: 'paypal', amount: '200' });
@@ -268,6 +297,44 @@ describe('POST /forms-admin/payments/action', () => {
       expect.objectContaining({ returnUrl: 'https://example.com/', cancelUrl: 'https://example.com/' }),
     );
   });
+
+  // 0.1.15: the currency comes from payments.quoteCurrency (it was a
+  // hardcoded 'usd'); the default stays 'usd', which the tests above pin
+  // through a config mock that carries no payments subtree at all.
+  it('uses payments.quoteCurrency for the Stripe link, the stored row and the quote email (AED desk)', async () => {
+    (config as { payments?: unknown }).payments = { quoteCurrency: 'aed', adminQuote: 'builtin' };
+    getEntryByIdMock.mockResolvedValueOnce(makeEntry());
+
+    await callPost({ entryId: 'e1', provider: 'stripe', amount: '2500.00' });
+
+    expect(createPaymentLinkMock).toHaveBeenCalledWith(expect.objectContaining({ amountCents: 250000, currency: 'aed' }));
+    expect(attachPaymentMock).toHaveBeenCalledWith('e1', expect.objectContaining({ currency: 'aed', amountCents: 250000 }));
+    expect(sendPaymentQuoteEmailMock.mock.calls[0]![0]).toMatchObject({ currency: 'aed' });
+  });
+
+  it('uses payments.quoteCurrency for a PayPal order too', async () => {
+    (config as { payments?: unknown }).payments = { quoteCurrency: 'eur', adminQuote: 'builtin' };
+    getEntryByIdMock.mockResolvedValueOnce(makeEntry());
+
+    await callPost({ entryId: 'e1', provider: 'paypal', amount: '200' });
+
+    expect(createOrderMock).toHaveBeenCalledWith(expect.objectContaining({ currency: 'eur' }));
+  });
+
+  it.each([['off'], [{ href: '/forms-admin/quote/' }]])(
+    'answers 404 and touches nothing when payments.adminQuote is %j (the host turned the built-in flow off)',
+    async (adminQuote) => {
+      (config as { payments?: unknown }).payments = { quoteCurrency: 'usd', adminQuote };
+      getEntryByIdMock.mockResolvedValueOnce(makeEntry());
+
+      const res = await callPost({ entryId: 'e1', provider: 'stripe', amount: '200' });
+
+      expect(res.status).toBe(404);
+      expect(getEntryByIdMock).not.toHaveBeenCalled();
+      expect(createPaymentLinkMock).not.toHaveBeenCalled();
+      expect(attachPaymentMock).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not block the 302 redirect on a rejected fire-and-forget quote email (copy-link is always available regardless of email outcome)', async () => {
     getEntryByIdMock.mockResolvedValueOnce(makeEntry());

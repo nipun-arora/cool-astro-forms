@@ -44,7 +44,14 @@ export interface StorageAdapter {
   /** Count entries matching filter (for pagination totals). */
   countEntries(filter: EntryFilter): Promise<number>;
 
-  /** Attach a payment record to an entry (Phase 3; table exists from Phase 1). */
+  /**
+   * Attach a payment record to an entry (Phase 3; table exists from Phase 1).
+   * A payment that carries a `providerRef` is written only when no row has
+   * that `providerRef` yet: one provider session, one row (0.1.15). The
+   * built-in adapters make the check and the insert one statement, so two
+   * overlapping writers cannot both insert; the second call writes nothing.
+   * Payments without a `providerRef` are always inserted.
+   */
   attachPayment(entryId: string, payment: Record<string, unknown>): Promise<void>;
 
   /** Attach file records to an entry (Phase 4; table exists from Phase 1). */

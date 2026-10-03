@@ -27,6 +27,8 @@ function makeConfig(overrides: Partial<ConfigWithTrailingSlash> = {}): ConfigWit
     payments: {
       payLinkFees: [{ label: 'Card fee', percent: 0.03 }],
       feeOverrides: 'off',
+      quoteCurrency: 'usd',
+      adminQuote: 'builtin',
       requestPage: { minAmountCents: 100, maxAmountCents: 1_000_000, allowedCurrencies: ['usd'] },
     },
     webhooks: [],

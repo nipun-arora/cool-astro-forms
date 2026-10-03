@@ -9,6 +9,201 @@ below as **BREAKING** rather than held for a 1.0 major.
 
 Entries are newest first.
 
+## [0.1.15] - Unreleased
+
+### Changed
+
+- **BREAKING: Astro 6 is no longer supported. The `astro` peer range is now
+  `^7.2.8` (it was `^6.0.0 || ^7.0.0`).** Astro 7.2.8 fixed a critical
+  remote code execution in Astro's AVIF image optimization
+  ([GHSA-26w7-cxv4-gfx2](https://github.com/advisories/GHSA-26w7-cxv4-gfx2)).
+  The last Astro 6 release, 6.4.8, still has that hole and four other Astro
+  advisories that were fixed during Astro 7, and Astro 6 pins `sharp` to
+  0.34, which has two high severity advisories fixed only in the 0.35 line
+  that Astro 7.2.9 requires. A range that still accepted Astro 6 let a site
+  install this package on a release with a known code execution hole. The
+  package's own code needed no change for Astro 7: the unit, end to end and
+  quickstart checks pass on Astro 7.2.9 with `@astrojs/node` 11.1.4.
+  - **Upgrading:** move the site to Astro 7.2.8 or a later 7.x release and an
+    adapter release built for Astro 7 (for the Node adapter,
+    `npm install astro@^7.2.8 @astrojs/node@^11.1.4`), then follow Astro's
+    v7 upgrade guide for the site's own code. Your `coolForms()` config does
+    not change. With npm 7 or later, installing 0.1.15 next to Astro 6 now
+    stops with a peer dependency conflict (`ERESOLVE`) instead of
+    installing.
+  - **Known:** every Astro 7 release, 7.2.9 included, depends on
+    `http-cache-semantics` `^4.2.0`, and its newest release, 4.2.0, has a
+    high severity advisory
+    ([GHSA-ch52-4w7c-c8xp](https://github.com/advisories/GHSA-ch52-4w7c-c8xp))
+    with no fixed release yet, so `npm audit` still reports it on an Astro 7
+    site. Astro imports it only in its build time cache for remote images.
+
+### Fixed
+
+- **Payments made through the admin "Create payment link" flow are now
+  marked paid.** The flow creates a Stripe Payment Link and stores the link
+  id (`plink_…`), but the Stripe webhook looked payments up only by the
+  Checkout Session id (`cs_…`) that the link produces when someone pays. The
+  lookup missed, the webhook logged `webhook.unknown-ref` and answered 200,
+  and the payment stayed unpaid with no "payment received" email. The
+  webhook now falls back to the session's `payment_link` id. Links created
+  by earlier versions are matched as well once you upgrade.
+  - **Upgrading:** check the Stripe dashboard for payments on admin-created
+    links that `/forms-admin/payments` still shows as `link_created`; those
+    were paid but never recorded. Mark them by hand or re-send the event
+    from the Stripe dashboard after upgrading.
+- The admin quote flow no longer hardcodes USD. It uses the new
+  `payments.quoteCurrency` (default `'usd'`, so nothing changes unless you
+  set it).
+- The `recovery` key of a `templatesModule` is now used. It was typed and
+  documented but never read, so the default recovery email went out even
+  when a host supplied its own.
+- `formatMoney` divided every amount by 100. Stripe amounts are in the
+  currency's smallest unit, which is 1 for zero-decimal currencies (500 JPY
+  is `500`) and 1/1000 for three-decimal ones (KWD, BHD, JOD, OMR, TND), so
+  those rendered 100x or 10x off in emails and on the entry page. The admin
+  payments table had the same division. Two-decimal currencies, AED
+  included, render as before.
+
+### Security
+
+- **The Stripe webhook checks the money before marking a payment paid.** A
+  validly signed `checkout.session.completed` used to flip the matched row
+  to `paid` on its event type alone. Now the row flips only when the
+  session's `payment_status` is `paid` and its `amount_total` and
+  `currency` equal the stored row. Anything else is recorded on the
+  payment's event log without the paid status and logged as
+  `webhook.settlement-mismatch`. No email goes out, and no outbound
+  `payment.paid` webhook fires. `checkout.session.async_payment_succeeded`
+  is now handled too, so a delayed payment method that completes unpaid
+  and settles later is marked paid when it settles.
+  - **Upgrading:** if your account offers delayed payment methods, add
+    `checkout.session.async_payment_succeeded` to the webhook endpoint's
+    events in the Stripe dashboard. Refunds, disputes and expired sessions
+    still do not change a payment's status in the admin (known limit).
+- Admin-created Stripe Payment Links accept one completed checkout
+  (`restrictions.completed_sessions.limit: 1`). Before, a quote link could
+  be paid any number of times while the admin showed one amount.
+- Under Astro's `security.csp`, the `/forms-admin` pages work: each page
+  registers the hash of the admin stylesheet with `Astro.csp`, and the
+  entry page's copy-link control runs from a bundled script instead of
+  inline `onfocus`/`onclick` attributes and a `style` attribute. Before,
+  the policy blocked the stylesheet (every admin page rendered unstyled)
+  and the copy button. A host that sets its own CSP header can add the
+  exported `ADMIN_STYLE_HASH` to its `style-src`; that one hash covers
+  every admin page, the login page included. The login page now renders
+  from the shared admin stylesheet like the other admin pages, so it no
+  longer carries an Astro-built style block whose hash changed with every
+  build. Like the other admin pages, it also stops loading the site's page
+  scripts (the `window.__cafConfig` inline script, capture and journey),
+  which keeps the login page out of the admin's own browser journey trail.
+  Its look is unchanged (computed styles compared before and
+  after at desktop and phone widths).
+- **Recovery emails link only to your own site.** The "Resume your form"
+  link was the page URL sent in the abandon request, unchecked. A script
+  outside a browser can send any `Origin` header and, in `auto` consent
+  mode, any email address, so it could make the site mail its own recovery
+  email to anyone with a link to anywhere, `javascript:` and `data:`
+  included. The link is now the abandoned page only when it is an http(s)
+  URL on the `siteUrl` origin (a relative path is made absolute against
+  `siteUrl`), and `siteUrl` otherwise. The check runs when the email is
+  sent, so rows saved before the upgrade are covered, and a host
+  `recovery` template receives the checked URL.
+- **The admin quote email goes to one valid address or to `notifyTo`.** The
+  entry field the quote email is sent to came from the visitor and was only
+  trimmed. A comma list sent the quote to every address in it, and a value
+  with a line break was read as an address group that delivered only to
+  the injected address. A field value that is not a single valid address
+  is now skipped, and the quote falls back to the form's `notifyTo` as it
+  does when there is no email field.
+- The built-in SQLite and Turso adapters write at most one payment row per
+  provider reference (`providerRef`). The check and the insert are one
+  statement, so two overlapping writes for the same Stripe session leave
+  one row instead of a paid row with an unpaid twin.
+- The Turnstile loader no longer loads Cloudflare's script on pages without
+  a `[data-caf]` form. With both keys set it used to load on every page of
+  the site. On a page with no form yet, the loader waits for the first
+  `[data-caf]` form to appear (a `client:only` island, a form a script
+  inserts, a view-transition navigation) and loads the script then, so a
+  form rendered on the client still gets its widget.
+
+### Added
+
+- **Relay-mode email:** `EMAIL_AUTH=ip` sends through an IP-allowlisted
+  SMTP relay (Google Workspace SMTP relay is the common case) with only
+  `EMAIL_HOST` and `EMAIL_PORT` set. The transport never sends an AUTH
+  command in this mode, even if `EMAIL_USER`/`EMAIL_PASS` are still set.
+  Port 587 requires STARTTLS (`requireTLS`) and 465 uses implicit TLS.
+  Before, a host with no user and password had every package email skipped
+  in production. Credential mode (the default) is unchanged.
+- **Sender address and name:** the From is `EMAIL_FROM`, then `EMAIL_USER`
+  if it is an email address, then `NOTIFY_EMAIL`, then the old
+  `noreply@cool-astro-forms.local` fallback. `EMAIL_FROM_NAME` adds a
+  display name. When the From domain is not the `siteUrl` domain, the server
+  logs one `notify.from-domain-mismatch` warning. `notify.smtp-unconfigured`
+  now names the mode whose settings are missing.
+  - **Upgrading:** if your environment sets `EMAIL_FROM` (some hosts set it
+    for their own mailer), package emails now use it instead of
+    `EMAIL_USER`. If `EMAIL_USER` is a username rather than an address (for
+    example SendGrid's `apikey`), package emails now come from `EMAIL_FROM`
+    or `NOTIFY_EMAIL` rather than that username.
+- `createCheckoutForEntry` (from `cool-astro-forms/server`): creates a
+  card-only Stripe Checkout Session for an existing entry and records it so
+  the webhook can match it. It validates every input and confirms the entry
+  exists before it calls Stripe. If the payment row cannot be written, it
+  expires the session and returns an error instead of the URL, so a guest
+  cannot be charged for a payment the admin does not know about.
+  A call that reuses an idempotency key (a double-click, the same quote
+  form posted again) gets Stripe's replay of the earlier session. A replay
+  never writes a row and never expires the session: it returns the same
+  URL when the earlier call recorded it, `replay-unrecorded` when it has
+  not (yet), and `storage-error` when the row cannot be read. See
+  docs/payments.md section 2a.
+- `isAdminRequest(context)` (from `cool-astro-forms/server`): the package's
+  admin-session check for a host's own pages and routes under
+  `/forms-admin`. Fails closed. The session cookie is scoped to
+  `/forms-admin`, so on any other path the browser never sends it and the
+  check is always false; the first such call logs one
+  `admin.is-admin-request-outside-admin-path` warning.
+- `payments.adminQuote`: `'builtin'` (default), `'off'` (no create control,
+  no `/forms-admin/payments/action` route), or `{ href }` (a "Create a
+  quote" link to the host's own page, with `?entry=<id>` added to the query
+  and any `#fragment` kept after it). A path `href`
+  must resolve on your own site the way a browser reads it: `/\evil.com`,
+  or two slashes with a tab or line break between them, both read as
+  `//evil.com` and fail config validation.
+- `payments.quoteCurrency`: the admin quote flow's currency (two-decimal
+  currencies only; default `'usd'`).
+- `escapeHtml`, `formatMoney` and the template types (`CafTemplates` and
+  each template's data type) are exported from `cool-astro-forms/server` for
+  host templates.
+
+### Internal
+
+- New contract test runs a signed Stripe event through the real webhook
+  route, the real payment handler and real SQLite: a session created with
+  `createCheckoutForEntry` is marked paid, a wrong amount is not, and a row
+  keyed by a Payment Link id is matched through the session it produced.
+- New SMTP-sink tests drive the real nodemailer transport over a socket and
+  check the wire: no AUTH command in relay mode, the expected `MAIL FROM`
+  and From header for both the abandoned-lead and payment-received emails.
+- New e2e spec on a production build with `security.csp` on: every admin
+  page, the "Create payment link" flow and the copy control, with zero
+  `securitypolicyviolation` events. A second case swaps in a hand-written
+  header that lists only `ADMIN_STYLE_HASH` and checks that the login page
+  and the list views stay styled with zero violations.
+- The middleware bridges `CAF_SITE_URL` from `siteUrl` (for the From-domain
+  check), and the integration bakes `cspEnabled` into the virtual config.
+- The playground and the quickstart check run on Astro 7.2.9 with
+  `@astrojs/node` 11.1.4 (were 6.4.8 and 10.1.x). The refreshed lockfile
+  also clears the svgo, js-yaml, smol-toml, postcss, nanoid and devalue
+  advisories the old Astro 6 tree carried (`devalue` moves to 5.9.4).
+- Astro 7's `astro dev` keeps a per project lock file and, under a coding
+  agent, detaches into the background. The Playwright config now starts each
+  playground dev instance with `--ignore-lock` and `ASTRO_DEV_BACKGROUND=1`
+  so the suite's seven dev servers still run side by side in the
+  foreground.
+
 ## [0.1.14] - 2026-10-03
 
 ### Security

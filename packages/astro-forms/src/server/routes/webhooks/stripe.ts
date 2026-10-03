@@ -15,6 +15,13 @@
  * PAY-04: inert (404, mirrors routes/canary.ts) without
  * STRIPE_WEBHOOK_SECRET — checked FIRST, before any body read.
  *
+ * 0.1.15: handles `checkout.session.completed` and
+ * `checkout.session.async_payment_succeeded`, forwards the session's
+ * Payment Link id as a second find key (fleet bug F1), and passes the
+ * provider-confirmed settlement (`payment_status`, amount, currency) so the
+ * handler only marks a row paid when those match it. Refunds, disputes and
+ * expired sessions are acknowledged without changing the row.
+ *
  * Clean-room: written fresh against 03-CONTEXT.md/03-RESEARCH.md, not
  * derived from any commercial form-plugin source.
  */
@@ -40,7 +47,37 @@ type ConfigWithExtras = typeof config & {
   templates?: CafTemplates;
 };
 
-const COMPLETED_EVENT_TYPE = 'checkout.session.completed';
+/**
+ * Session events that can settle a payment: the normal completion, and
+ * (0.1.15) the later success of a delayed payment method, whose session
+ * completes with `payment_status: 'unpaid'` first. The handler's settlement
+ * check, not the event type, decides whether either marks the row paid.
+ */
+const SETTLING_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'checkout.session.completed',
+  'checkout.session.async_payment_succeeded',
+]);
+
+/**
+ * Amount and currency in the integration currency the row was created in.
+ * Sessions created before Stripe's 2025-03-31 API change that used Adaptive
+ * Pricing report the customer's presentment currency at the top level and
+ * the original under `currency_conversion`.
+ */
+function integrationAmount(session: Stripe.Checkout.Session): { amountCents: number | null; currency: string | null } {
+  const conversion = session.currency_conversion;
+  if (conversion && typeof conversion.amount_total === 'number' && conversion.source_currency) {
+    return { amountCents: conversion.amount_total, currency: conversion.source_currency };
+  }
+  return { amountCents: session.amount_total ?? null, currency: session.currency ?? null };
+}
+
+/** The Payment Link a session came from (`plink_…`), id or expanded object; undefined for sessions created directly. */
+function paymentLinkId(session: Stripe.Checkout.Session): string | undefined {
+  const link = session.payment_link;
+  if (typeof link === 'string') return link;
+  return link?.id;
+}
 
 export const POST: APIRoute = async ({ request }) => {
   // PAY-04: module stays inert without the webhook secret (mirrors canary.ts's own env-gated 404).
@@ -75,7 +112,7 @@ export const POST: APIRoute = async ({ request }) => {
   }
 
   const event = verified.event;
-  if (event.type !== COMPLETED_EVENT_TYPE) {
+  if (!SETTLING_EVENT_TYPES.has(event.type)) {
     // Always 200 once the signature is valid, even for unhandled event
     // types (ack) — Stripe should never retry a type we deliberately don't act on.
     log('webhook.stripe.unhandled-event', { type: event.type });
@@ -88,14 +125,22 @@ export const POST: APIRoute = async ({ request }) => {
     const trailingSlash = (config as ConfigWithExtras).trailingSlash;
     const templateOverride = (config as ConfigWithExtras).templates?.paymentReceived;
 
+    const { amountCents, currency } = integrationAmount(session);
+    const alternateProviderRef = paymentLinkId(session);
+
     const result = await handleInboundPayment(
       {
         providerRef: session.id,
         eventId: event.id,
         eventType: event.type,
         provider: 'stripe',
-        amountCents: session.amount_total ?? undefined,
-        currency: session.currency ?? undefined,
+        amountCents: amountCents ?? undefined,
+        currency: currency ?? undefined,
+        // F1 (0.1.15): admin Payment Link rows are keyed by the link id.
+        ...(alternateProviderRef ? { alternateProviderRef } : {}),
+        // 0.1.15: only a paid session for the stored amount and currency
+        // marks the row paid (handle-inbound.ts judgeSettlement).
+        settlement: { paid: session.payment_status === 'paid', amountCents, currency },
       },
       {
         storage,

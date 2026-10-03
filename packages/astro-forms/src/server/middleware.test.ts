@@ -72,6 +72,7 @@ const ORIGINAL_CAF_GEO_TIMEOUT_MS = process.env.CAF_GEO_TIMEOUT_MS;
 const ORIGINAL_CAF_DRIVE_LINK_ACCESS = process.env.CAF_DRIVE_LINK_ACCESS;
 const ORIGINAL_CAF_DRIVE_ROOT_FOLDER = process.env.CAF_DRIVE_ROOT_FOLDER;
 const ORIGINAL_CAF_DRIVE_FALLBACK_MAX_BYTES = process.env.CAF_DRIVE_FALLBACK_MAX_BYTES;
+const ORIGINAL_CAF_SITE_URL = process.env.CAF_SITE_URL;
 
 /**
  * Flushes several microtask ticks — 05-04's storage acquisition sites
@@ -129,6 +130,13 @@ describe('registerRuntimeConfig', () => {
     else process.env.CAF_DRIVE_ROOT_FOLDER = ORIGINAL_CAF_DRIVE_ROOT_FOLDER;
     if (ORIGINAL_CAF_DRIVE_FALLBACK_MAX_BYTES === undefined) delete process.env.CAF_DRIVE_FALLBACK_MAX_BYTES;
     else process.env.CAF_DRIVE_FALLBACK_MAX_BYTES = ORIGINAL_CAF_DRIVE_FALLBACK_MAX_BYTES;
+    if (ORIGINAL_CAF_SITE_URL === undefined) delete process.env.CAF_SITE_URL;
+    else process.env.CAF_SITE_URL = ORIGINAL_CAF_SITE_URL;
+  });
+
+  it('sets CAF_SITE_URL from cfg.siteUrl (0.1.15: notify.ts compares the From domain with it and cannot see the virtual config)', () => {
+    registerRuntimeConfig({ ...mockConfig, siteUrl: 'https://tours.example' } as never);
+    expect(process.env.CAF_SITE_URL).toBe('https://tours.example');
   });
 
   it('sets CAF_DB_PATH from cfg.dbPath (Phase 1 behavior preserved)', () => {

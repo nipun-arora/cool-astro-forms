@@ -9,6 +9,8 @@
  * layer — every generated nav-tab href, row-detail link, and pagination
  * link must honor trailingSlash via adminUrl).
  */
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { Entry, Payment } from '../../types.js';
 import { PAYMENT_REQUEST_FORM_ID } from '../payment-constants.js';
@@ -20,10 +22,14 @@ import {
   MAX_ENTRY_LIMIT,
   parseEntryFilter,
   parsePaymentFilter,
+  ADMIN_STYLE_HASH,
   renderAdminPageHtml,
+  renderAdminPageParts,
   renderAnalyticsPanelHtml,
+  renderLoginPageHtml,
   renderEntryTableHtml,
   renderPaymentRequestChipHtml,
+  renderPaymentsSectionHtml,
   renderPaymentsTableHtml,
 } from './_shared.js';
 
@@ -670,6 +676,21 @@ describe('renderPaymentsTableHtml', () => {
     expect(html).toContain('&lt;script&gt;');
   });
 
+  it("shows the Amount column in the row's own currency decimals: 500 JPY reads 500, not 5.00; 250000 AED reads 2500.00", () => {
+    const html = renderPaymentsTableHtml({
+      payments: [
+        makePayment({ id: 'p-jpy', amountCents: 500, currency: 'jpy' }),
+        makePayment({ id: 'p-aed', amountCents: 250000, currency: 'aed' }),
+      ],
+      total: 2,
+      filter: {},
+      basePath: '/forms-admin/payments',
+    });
+    expect(html).toContain('<td>500</td><td>JPY</td>');
+    expect(html).not.toContain('<td>5.00</td>');
+    expect(html).toContain('<td>2500.00</td><td>AED</td>');
+  });
+
   it('links the Entry cell to /forms-admin/entries/{entryId}, trailingSlash-aware (B1)', () => {
     const html = renderPaymentsTableHtml({
       payments: [makePayment({ entryId: 'e42' })],
@@ -717,5 +738,185 @@ describe('renderPaymentsTableHtml', () => {
     });
     expect(html).toContain('<table>');
     expect(html).not.toContain('undefined');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.1.15 — admin pages under a Content Security Policy. A strict CSP (Astro's
+// security.csp, or a host header) blocks an inline <style> whose hash is not
+// listed, every inline event handler attribute, and every style="" attribute.
+// The admin shell's one <style> is registered by hash, so the hash must be
+// computed from the exact bytes the shell emits; the copy-link control moved
+// to data attributes driven by a bundled script.
+// ---------------------------------------------------------------------------
+
+describe('admin CSP support (0.1.15)', () => {
+  it('ADMIN_STYLE_HASH is the sha256 of the exact <style> body renderAdminPageHtml emits (so a registered hash always matches)', () => {
+    const html = renderAdminPageHtml({ title: 'Entries', active: 'entries', bodyHtml: '' });
+    const styleBody = html.match(/<style>([\s\S]*?)<\/style>/)![1]!;
+    const expected = `sha256-${createHash('sha256').update(styleBody, 'utf8').digest('base64')}`;
+    expect(ADMIN_STYLE_HASH).toBe(expected);
+  });
+
+  it('renderAdminPageParts splits the document after </main>, and start + newline + end is byte-identical to renderAdminPageHtml', () => {
+    const opts = { title: 'Entry e1', active: 'entries' as const, trailingSlash: 'always' as const, bodyHtml: '<p>x</p>' };
+    const { start, end } = renderAdminPageParts(opts);
+    expect(start.endsWith('</main>')).toBe(true);
+    expect(end).toBe('</body>\n</html>');
+    expect(`${start}\n${end}`).toBe(renderAdminPageHtml(opts));
+  });
+
+  it('no admin render helper emits an inline event handler or a style attribute', () => {
+    const page = renderAdminPageHtml({ title: 'T', active: 'payments', bodyHtml: '' });
+    const section = renderPaymentsSectionHtml({
+      entryId: 'e1',
+      payments: [paymentRow()],
+      providerConfigured: true,
+      paymentActionUrl: '/forms-admin/payments/action',
+      adminQuote: 'builtin',
+      quoteCurrency: 'usd',
+    });
+    for (const html of [page, section]) {
+      expect(html).not.toMatch(/\son[a-z]+\s*=/i);
+      expect(html).not.toMatch(/\sstyle\s*=/i);
+    }
+  });
+});
+
+// The login page is the one admin page a host's own CSP header must also
+// cover. Up to this fix it carried its own Astro-processed <style>: minified,
+// scoped with a build-dependent data-astro-cid, so its hash changed per build
+// and no host could list it in advance. Under the documented setup (add
+// ADMIN_STYLE_HASH to style-src) the login page rendered unstyled.
+describe('admin login page under a host-written CSP (0.1.15)', () => {
+  const loginSource = readFileSync(new URL('./login.astro', import.meta.url), 'utf8');
+
+  it('login.astro has no <style> block of its own: its only inline style is the shared admin stylesheet, so ADMIN_STYLE_HASH covers it', () => {
+    expect(loginSource).not.toMatch(/<style[\s>]/i);
+  });
+
+  it('login.astro registers ADMIN_STYLE_HASH with Astro.csp only when CSP is on, like every other admin page', () => {
+    expect(loginSource).toMatch(/if \(config\.cspEnabled\) Astro\.csp\?\.insertStyleHash\(ADMIN_STYLE_HASH\);/);
+  });
+
+  it('renderLoginPageHtml emits exactly one inline <style>, and it hashes to ADMIN_STYLE_HASH', () => {
+    const html = renderLoginPageHtml({ actionUrl: '/forms-admin/auth/', hasError: false });
+    const styles = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]!);
+    expect(styles).toHaveLength(1);
+    expect(`sha256-${createHash('sha256').update(styles[0]!, 'utf8').digest('base64')}`).toBe(ADMIN_STYLE_HASH);
+    expect(html).not.toMatch(/<script/i);
+    expect(html).not.toMatch(/\son[a-z]+\s*=/i);
+    expect(html).not.toMatch(/\sstyle\s*=/i);
+  });
+
+  it('renderLoginPageHtml is the unauthenticated page: noindex, no admin nav, no .db download link, the form posts to the given action', () => {
+    const html = renderLoginPageHtml({ actionUrl: '/forms-admin/auth/', hasError: false });
+    expect(html).toContain('<meta name="robots" content="noindex" />');
+    expect(html).not.toContain('<nav');
+    expect(html).not.toContain('export.db');
+    expect(html).toContain('<form method="post" action="/forms-admin/auth/">');
+    expect(html).toContain('<input id="password" name="password" type="password" autocomplete="current-password" required />');
+    expect(html).not.toContain('role="alert"');
+  });
+
+  it('renderLoginPageHtml shows the error only when asked, and escapes the action URL', () => {
+    const html = renderLoginPageHtml({ actionUrl: '/a"b<c', hasError: true });
+    expect(html).toContain('<p class="error" role="alert">Incorrect password. Please try again.</p>');
+    expect(html).toContain('action="/a&quot;b&lt;c"');
+  });
+});
+
+function paymentRow(overrides: Partial<Payment> = {}): Payment {
+  return {
+    id: 'p1',
+    entryId: 'e1',
+    provider: 'stripe',
+    amountCents: 250000,
+    currency: 'aed',
+    status: 'link_created',
+    payLinkUrl: 'https://buy.stripe.com/test_<x>',
+    createdAt: 1700000000000,
+    updatedAt: 1700000000000,
+    ...overrides,
+  };
+}
+
+describe('renderPaymentsSectionHtml (entry detail, 0.1.15)', () => {
+  const base = {
+    entryId: 'e1',
+    payments: [] as Payment[],
+    providerConfigured: true,
+    paymentActionUrl: '/forms-admin/payments/action',
+    adminQuote: 'builtin' as const,
+    quoteCurrency: 'usd',
+  };
+
+  it('a payment row shows status, the currency-formatted amount, and a copy control wired by data attributes to its read-only link input', () => {
+    const html = renderPaymentsSectionHtml({ ...base, payments: [paymentRow()] });
+    expect(html).toContain('<strong>link_created</strong>');
+    expect(html).toContain('AED\u00a02,500.00');
+    expect(html).toContain('id="caf-pay-link-p1"');
+    expect(html).toContain('class="pay-link-input"');
+    expect(html).toContain('data-caf-select-on-focus');
+    expect(html).toContain('data-caf-copy-target="caf-pay-link-p1"');
+    expect(html).toContain('value="https://buy.stripe.com/test_&lt;x&gt;"');
+  });
+
+  it("'builtin' with a provider configured renders the Create payment link form, labelled in the quote currency", () => {
+    const html = renderPaymentsSectionHtml({ ...base, quoteCurrency: 'aed' });
+    expect(html).toContain('action="/forms-admin/payments/action"');
+    expect(html).toContain('<input type="hidden" name="entryId" value="e1" />');
+    expect(html).toContain('Amount (AED)');
+    expect(html).toContain('Create payment link');
+  });
+
+  it("'builtin' with no provider configured keeps the 0.1.14 hint instead of a form", () => {
+    const html = renderPaymentsSectionHtml({ ...base, providerConfigured: false });
+    expect(html).toContain('No payment provider is configured');
+    expect(html).not.toContain('Create payment link');
+  });
+
+  it("'off' renders no create control at all, only the payment list", () => {
+    const html = renderPaymentsSectionHtml({ ...base, adminQuote: 'off', payments: [paymentRow()] });
+    expect(html).not.toContain('<form');
+    expect(html).not.toContain('Create payment link');
+    expect(html).not.toContain('No payment provider is configured');
+    expect(html).toContain('caf-pay-link-p1');
+  });
+
+  it('{ href } renders a link to the host quote page carrying the entry id, and no built-in form, provider or not', () => {
+    for (const providerConfigured of [true, false]) {
+      const html = renderPaymentsSectionHtml({
+        ...base,
+        providerConfigured,
+        entryId: 'e 1&x',
+        adminQuote: { href: '/forms-admin/quote/' },
+      });
+      expect(html).toContain('<a href="/forms-admin/quote/?entry=e%201%26x">Create a quote</a>');
+      expect(html).not.toContain('<form');
+    }
+    const withQuery = renderPaymentsSectionHtml({ ...base, adminQuote: { href: 'https://desk.example.com/q?src=admin' } });
+    expect(withQuery).toContain('href="https://desk.example.com/q?src=admin&amp;entry=e1"');
+  });
+
+  // The host quote page reads `entry` from the query string. A query
+  // parameter written after a `#` is part of the fragment, which the page
+  // never sees as a parameter, so the id must go before the fragment.
+  it('{ href } with a #fragment puts entry=<id> in the query, before the fragment', () => {
+    const cases: [string, string][] = [
+      ['/forms-admin/quote/#form', '/forms-admin/quote/?entry=e1#form'],
+      ['/forms-admin/quote/#form?x=1', '/forms-admin/quote/?entry=e1#form?x=1'],
+      ['https://desk.example.com/q?src=admin#top', 'https://desk.example.com/q?src=admin&entry=e1#top'],
+    ];
+    for (const [href, expected] of cases) {
+      const html = renderPaymentsSectionHtml({ ...base, adminQuote: { href } });
+      const rendered = /<a href="([^"]*)">Create a quote<\/a>/.exec(html)?.[1]?.replaceAll('&amp;', '&');
+      expect(rendered).toBe(expected);
+      expect(new URL(rendered!, 'https://site.example').searchParams.get('entry')).toBe('e1');
+    }
+  });
+
+  it('renders the EMPTY state when there are no payments', () => {
+    expect(renderPaymentsSectionHtml(base)).toContain('No payments yet.');
   });
 });

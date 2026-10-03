@@ -4,7 +4,8 @@
  * geo, journey timeline (JRNY-03), the turnstile-failed flag (D3/B2),
  * payments (PAY-01/02), status controls, hard delete, and purgeVisitor.
  * Reuses templates.ts's escapeHtml/renderFieldsHtml/renderJourneyTimelineHtml/
- * renderGeoLine/formatMoney (P02/W3, T-01-36) — never re-implements them;
+ * renderGeoLine (P02/W3, T-01-36) — never re-implements them; the Payments
+ * section is _shared.ts's renderPaymentsSectionHtml (0.1.15);
  * renderGeoLine's own City/Region/Country line is supplemented (not
  * replaced) with lat/lon/postal/isp, fields renderGeoLine itself doesn't
  * cover. Route injection consolidated in P05 Task 3 (integration.ts).
@@ -15,13 +16,17 @@ import { logError } from '../log.js';
 import { paypalConfigured } from '../payments/paypal.js';
 import { getDb } from '../storage/db.js';
 import { SqliteStorage } from '../storage/sqlite.js';
-import { escapeHtml, formatMoney, renderFieldsHtml, renderGeoLine, renderJourneyTimelineHtml } from '../templates.js';
-import { adminUrl, renderAdminPageHtml } from './_shared.js';
+import { escapeHtml, renderFieldsHtml, renderGeoLine, renderJourneyTimelineHtml } from '../templates.js';
+import { ADMIN_STYLE_HASH, adminUrl, renderAdminPageParts, renderPaymentsSectionHtml } from './_shared.js';
 
 export const prerender = false;
 
 type ConfigWithTrailingSlash = typeof config & { trailingSlash?: 'always' | 'never' | 'ignore' };
 const trailingSlash = (config as ConfigWithTrailingSlash).trailingSlash;
+
+// 0.1.15: under the host's Astro CSP, allow the admin shell's inline <style>
+// by hash. Only read Astro.csp when CSP is on (it warns per request otherwise).
+if (config.cspEnabled) Astro.csp?.insertStyleHash(ADMIN_STYLE_HASH);
 
 const id = Astro.params.id ?? '';
 
@@ -47,46 +52,8 @@ const actionUrl = adminUrl('/forms-admin/entries/action', trailingSlash);
 const entriesUrl = adminUrl('/forms-admin/entries', trailingSlash);
 const paymentActionUrl = adminUrl('/forms-admin/payments/action', trailingSlash);
 
-/** PAY-04 — the "Create payment link" form only ever renders when a provider is actually usable server-side; STRIPE_SECRET_KEY is read directly (never surfaced to the client) alongside the PayPal PAY-04 gate. */
+/** PAY-04 — the built-in "Create payment link" form only ever renders when a provider is actually usable server-side; STRIPE_SECRET_KEY is read directly (never surfaced to the client) alongside the PAY-04 PayPal gate. */
 const providerConfigured = Boolean(process.env.STRIPE_SECRET_KEY) || paypalConfigured();
-
-/** One row per payment: status/amount/provider/created + a native copy-to-clipboard control (readonly input + a tiny inline button — zero client framework, matching this page's checkbox-confirm precedent). */
-function renderPaymentRowHtml(payment: Payment): string {
-  const amount = payment.amountCents !== undefined ? formatMoney(payment.amountCents, payment.currency ?? 'usd') : 'n/a';
-  const status = escapeHtml(payment.status ?? 'pending');
-  const provider = escapeHtml(payment.provider ?? 'n/a');
-  const created = escapeHtml(new Date(payment.createdAt).toISOString());
-  const copyControl = payment.payLinkUrl
-    ? `<input type="text" readonly value="${escapeHtml(payment.payLinkUrl)}" onfocus="this.select()" style="width:20rem;max-width:100%;" /> <button type="button" onclick="navigator.clipboard.writeText(this.previousElementSibling.value)">Copy link</button>`
-    : '(no link yet)';
-  return `<li><strong>${status}</strong> — ${amount} via ${provider} — ${created}<br />${copyControl}</li>`;
-}
-
-/** Renders the Payments section body: existing payment rows (EMPTY state when none) + the "Create payment link" form, gated on providerConfigured (PAY-04). */
-function renderPaymentsSectionHtml(entryPayments: Payment[]): string {
-  const list =
-    entryPayments.length === 0
-      ? '<p class="state-empty">No payments yet.</p>'
-      : `<ul>${entryPayments.map(renderPaymentRowHtml).join('')}</ul>`;
-
-  const createForm = providerConfigured
-    ? `<form method="post" action="${escapeHtml(paymentActionUrl)}">
-    <input type="hidden" name="entryId" value="${escapeHtml(id)}" />
-    <label for="payment-amount">Amount (USD)</label>
-    <input id="payment-amount" name="amount" type="text" inputmode="decimal" placeholder="200.00" required />
-    <label for="payment-memo">Memo</label>
-    <input id="payment-memo" name="memo" type="text" />
-    <label for="payment-provider">Provider</label>
-    <select id="payment-provider" name="provider">
-      <option value="stripe">Stripe</option>
-      <option value="paypal">PayPal</option>
-    </select>
-    <button type="submit">Create payment link</button>
-  </form>`
-    : '<p class="state-empty">No payment provider is configured — set STRIPE_SECRET_KEY or PAYPAL_CLIENT_ID/PAYPAL_CLIENT_SECRET to enable payment links.</p>';
-
-  return `${list}${createForm}`;
-}
 
 /** Human-readable byte size (KB/MB) — a small local helper, mirroring the other per-page render helpers on this file. */
 function formatBytes(sizeBytes: number | undefined): string {
@@ -208,7 +175,14 @@ if (error) {
     </section>
     <section>
       <h2>Payments</h2>
-      ${renderPaymentsSectionHtml(payments)}
+      ${renderPaymentsSectionHtml({
+        entryId: id,
+        payments,
+        providerConfigured,
+        paymentActionUrl,
+        adminQuote: config.payments?.adminQuote ?? 'builtin',
+        quoteCurrency: config.payments?.quoteCurrency ?? 'usd',
+      })}
     </section>
     <section>
       <h2>Delete</h2>
@@ -221,7 +195,8 @@ if (error) {
   `;
 }
 
-const pageHtml = renderAdminPageHtml({
+// Split after </main> so the bundled copy-link script below lands inside <body>.
+const { start: pageStart, end: pageEnd } = renderAdminPageParts({
   title: entry ? `Entry ${entry.id} — Admin` : 'Entry — Admin',
   active: 'entries',
   trailingSlash,
@@ -229,4 +204,26 @@ const pageHtml = renderAdminPageHtml({
 });
 ---
 
-<Fragment set:html={pageHtml} />
+<Fragment set:html={pageStart} />
+<script>
+  // Payments copy-link control (0.1.15). Replaces inline onfocus/onclick
+  // attributes, which a strict Content Security Policy blocks. Astro
+  // processes this script: emitted as a same-origin file, or inlined with its
+  // hash added to Astro's own CSP when it is small.
+  document.addEventListener('focusin', (event) => {
+    const target = event.target;
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-caf-select-on-focus')) target.select();
+  });
+  document.addEventListener('click', (event) => {
+    const button = event.target instanceof Element ? event.target.closest('[data-caf-copy-target]') : null;
+    if (!button) return;
+    const input = document.getElementById(button.getAttribute('data-caf-copy-target') ?? '');
+    if (!(input instanceof HTMLInputElement)) return;
+    if (!navigator.clipboard) {
+      input.select();
+      return;
+    }
+    navigator.clipboard.writeText(input.value).catch(() => input.select());
+  });
+</script>
+<Fragment set:html={pageEnd} />

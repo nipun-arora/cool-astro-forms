@@ -13,7 +13,7 @@ body:
     id: astro
     attributes:
       label: Astro version and adapter
-      placeholder: "astro 7.2.1, @astrojs/node standalone"
+      placeholder: "astro 7.2.9, @astrojs/node standalone"
     validations:
       required: true
   - type: dropdown

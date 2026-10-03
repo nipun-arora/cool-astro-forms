@@ -9,7 +9,20 @@ import type {
   RecoveryEmailData,
 } from './notify.js';
 
-const ENV_KEYS = ['EMAIL_HOST', 'EMAIL_PORT', 'EMAIL_USER', 'EMAIL_PASS', 'NODE_ENV'] as const;
+// The 0.1.15 From/relay variables are isolated too, so a runner whose own
+// environment sets one of them cannot change the From these tests pin.
+const ENV_KEYS = [
+  'EMAIL_HOST',
+  'EMAIL_PORT',
+  'EMAIL_USER',
+  'EMAIL_PASS',
+  'NODE_ENV',
+  'EMAIL_AUTH',
+  'EMAIL_FROM',
+  'EMAIL_FROM_NAME',
+  'NOTIFY_EMAIL',
+  'CAF_SITE_URL',
+] as const;
 type EnvKey = (typeof ENV_KEYS)[number];
 
 let savedEnv: Record<EnvKey, string | undefined>;

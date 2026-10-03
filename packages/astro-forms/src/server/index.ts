@@ -28,6 +28,36 @@ export type { Entry, EntryStatus, JourneyStep, WebhookEventType, WebhookTarget }
  */
 export type { FileInput, FileRecord, FileUploadOutcome } from '../types.js';
 
+/**
+ * Payments for host pages (0.1.15): a card-only Stripe Checkout Session for
+ * an existing entry, recorded so the package's webhook can match it, and the
+ * admin-session check for a host's own admin pages and routes.
+ */
+export { createCheckoutForEntry } from './payments/checkout-for-entry.js';
+export type {
+  CreateCheckoutForEntryDeps,
+  CreateCheckoutForEntryErrorCode,
+  CreateCheckoutForEntryInput,
+  CreateCheckoutForEntryResult,
+} from './payments/checkout-for-entry.js';
+export { isAdminRequest } from './security/is-admin-request.js';
+export type { AdminRequestContext, IsAdminRequestOptions } from './security/is-admin-request.js';
+
+/**
+ * Email template building blocks (0.1.15) for a host's `templatesModule`:
+ * the same HTML escaper and currency-aware money formatter the default
+ * templates use, plus the data and result types of every template key.
+ */
+export { escapeHtml, formatMoney } from './templates.js';
+export type {
+  AbandonedLeadEmailData,
+  CafTemplates,
+  NotifyTemplateResult,
+  PaymentQuoteEmailData,
+  PaymentReceivedEmailData,
+  RecoveryEmailData,
+} from './notify.js';
+
 export { verifyTurnstile } from './turnstile.js';
 export type { VerifyTurnstileOptions, VerifyTurnstileOutcome, VerifyTurnstileResult } from './turnstile.js';
 

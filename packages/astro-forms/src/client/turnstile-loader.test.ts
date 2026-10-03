@@ -10,7 +10,7 @@ vi.mock('./capture.js', () => ({
   setTurnstileResetter: setTurnstileResetterMock,
 }));
 
-import { init, renderWidgets, resetWidgetRegistry, resetWidgets } from './turnstile-loader.js';
+import { init, renderWidgets, resetWidgetRegistry, resetWidgets, stopFormWatch } from './turnstile-loader.js';
 
 function buildTaggedForm(formId = 'demo'): HTMLFormElement {
   const form = document.createElement('form');
@@ -24,7 +24,9 @@ function cleanup(): void {
   document.head.querySelectorAll('script[data-caf-turnstile-script]').forEach((el) => el.remove());
   delete (window as unknown as { __cafConfig?: unknown }).__cafConfig;
   delete (window as unknown as { turnstile?: unknown }).turnstile;
+  delete (window as unknown as { __cafTurnstileOnload?: unknown }).__cafTurnstileOnload;
   resetWidgetRegistry();
+  stopFormWatch();
   setTurnstileResetterMock.mockClear();
 }
 
@@ -43,7 +45,12 @@ describe('turnstile-loader — init() (inert without a configured siteKey)', () 
     expect(document.querySelector('script[data-caf-turnstile-script]')).toBeNull();
   });
 
-  it('injects the Cloudflare api.js explicit-render script tag when turnstileSiteKey is present', () => {
+  // 0.1.15: these two cases now tag a form first. Up to 0.1.14 they ran on a
+  // page with NO [data-caf] form and expected the script anyway, which was
+  // the behaviour being removed: a site key alone put Cloudflare's script on
+  // every page of the site (see the form-less case below).
+  it('injects the Cloudflare api.js explicit-render script tag when turnstileSiteKey is present and the page has a [data-caf] form', () => {
+    buildTaggedForm();
     window.__cafConfig = { siteId: 'site-1', turnstileSiteKey: '1x00000000000000000000AA' };
     init();
     const script = document.querySelector<HTMLScriptElement>('script[data-caf-turnstile-script]');
@@ -53,10 +60,20 @@ describe('turnstile-loader — init() (inert without a configured siteKey)', () 
   });
 
   it('does not inject a second script tag on repeated init() calls (idempotent)', () => {
+    buildTaggedForm();
     window.__cafConfig = { siteId: 'site-1', turnstileSiteKey: '1x00000000000000000000AA' };
     init();
     init();
     expect(document.querySelectorAll('script[data-caf-turnstile-script]').length).toBe(1);
+  });
+
+  it('loads nothing on a page with no [data-caf] form, even with a site key: no third-party script, no onload global, on pages that have nothing to protect', () => {
+    const untagged = document.createElement('form');
+    document.body.appendChild(untagged);
+    window.__cafConfig = { siteId: 'site-1', turnstileSiteKey: '1x00000000000000000000AA' };
+    init();
+    expect(document.querySelector('script[data-caf-turnstile-script]')).toBeNull();
+    expect((window as unknown as Record<string, unknown>).__cafTurnstileOnload).toBeUndefined();
   });
 });
 
@@ -226,5 +243,78 @@ describe('turnstile-loader — resetWidgets() re-arms spent widgets', () => {
 
     expect(() => resetWidgets()).not.toThrow();
     expect(resetMock).toHaveBeenCalledWith('widget-b');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A form that appears AFTER the loader ran. 0.1.15 stopped loading api.js on
+// pages with no [data-caf] form, but a client:only island, a form a script
+// inserts, or a ClientRouter navigation into a form page all add the form
+// after this module's one init() pass. Up to 0.1.14 such a form still got a
+// widget from api.js's onload pass (the script loaded on every page); a host
+// that verifies the token on that form would otherwise get no widget and no
+// cf-turnstile-response at all.
+// ---------------------------------------------------------------------------
+
+/** MutationObserver callbacks run as microtasks; a macrotask turn flushes them. */
+const flushObservers = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+const SITE_KEY = '1x00000000000000000000AA';
+
+describe('turnstile-loader — a [data-caf] form added after the page loaded', () => {
+  beforeEach(cleanup);
+  afterEach(cleanup);
+
+  it('loads api.js once the first form appears, and the onload pass renders a widget into it (client:only island, JS-inserted form)', async () => {
+    window.__cafConfig = { siteId: 'site-1', turnstileSiteKey: SITE_KEY };
+    init();
+    expect(document.querySelector('script[data-caf-turnstile-script]')).toBeNull();
+
+    const form = buildTaggedForm('contact');
+    form.innerHTML = '<button>Send</button>';
+    await flushObservers();
+
+    expect(document.querySelectorAll('script[data-caf-turnstile-script]').length).toBe(1);
+    // Cloudflare's api.js arrives and calls the onload global it was given.
+    const renderMock = vi.fn(() => 'widget-late');
+    window.turnstile = { render: renderMock };
+    (window as unknown as Record<string, () => void>).__cafTurnstileOnload!();
+
+    expect(renderMock).toHaveBeenCalledTimes(1);
+    expect(form.querySelector('[data-caf-turnstile]')).not.toBeNull();
+  });
+
+  it('catches a form brought in by a view-transition style body swap', async () => {
+    window.__cafConfig = { siteId: 'site-1', turnstileSiteKey: SITE_KEY };
+    init();
+
+    const nextBody = document.createElement('body');
+    nextBody.innerHTML = '<main><form data-caf="booking"><button>Book</button></form></main>';
+    document.body.replaceWith(nextBody);
+    await flushObservers();
+
+    expect(document.querySelector('script[data-caf-turnstile-script]')).not.toBeNull();
+  });
+
+  it('stays inert on a page that never gets a form: unrelated DOM changes load nothing', async () => {
+    window.__cafConfig = { siteId: 'site-1', turnstileSiteKey: SITE_KEY };
+    init();
+
+    const note = document.createElement('div');
+    note.innerHTML = '<form><input name="q"></form>';
+    document.body.appendChild(note);
+    await flushObservers();
+
+    expect(document.querySelector('script[data-caf-turnstile-script]')).toBeNull();
+    expect((window as unknown as Record<string, unknown>).__cafTurnstileOnload).toBeUndefined();
+  });
+
+  it('does not watch at all without a site key', async () => {
+    window.__cafConfig = { siteId: 'site-1' };
+    init();
+
+    buildTaggedForm();
+    await flushObservers();
+
+    expect(document.querySelector('script[data-caf-turnstile-script]')).toBeNull();
   });
 });

@@ -17,7 +17,7 @@ Hosted form services and WordPress form plugins receive submissions. cool-astro-
 | Admin UI + analytics | WordPress admin | Their dashboard | Minimal or none | `/forms-admin` |
 | Where your data lives | Your WP database | Their servers | Your infrastructure | Your SQLite file |
 | Form builder / markup generation | Built in | Built in | Rarely | Not offered (bring your own form) |
-| Runtime requirement | PHP + WordPress | None (their servers) | Varies | Astro 6/7 server output |
+| Runtime requirement | PHP + WordPress | None (their servers) | Varies | Astro 7 server output |
 | Cost | Annual per-site license | Monthly plan | Free | Free, MIT |
 
 ## When NOT to choose cool-astro-forms

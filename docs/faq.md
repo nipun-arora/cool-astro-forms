@@ -4,7 +4,7 @@ Short, self-contained answers to the questions we get most. Each answer stands o
 
 ## Does cool-astro-forms work with static Astro sites?
 
-No. It requires Astro 6 or 7 with `output: 'server'` and a server-capable adapter (for example `@astrojs/node`). The capture endpoint, admin UI, and payment routes are server routes; a fully static site has nothing for them to run on. If your site is static today, adding the Node adapter in server mode is the one prerequisite.
+No. It requires Astro 7.2.8 or a later 7.x release with `output: 'server'` and a server-capable adapter (for example `@astrojs/node`). The capture endpoint, admin UI, and payment routes are server routes; a fully static site has nothing for them to run on. If your site is static today, adding the Node adapter in server mode is the one prerequisite.
 
 ## How does form-abandonment capture work?
 
@@ -40,4 +40,4 @@ The mechanics are built in: `retentionDays` auto-purge, `purgeVisitor()` erasure
 
 ## Is it production-ready?
 
-It runs in production on a live services business, and versions 0.1.2 through 0.1.10 each shipped from a real finding there (persistence across redeploys, proxy CSRF behavior, edge bot-challenges on payment submits). 1,102 unit tests and a Playwright e2e suite cover it, and the README quickstart is verified against a packed tarball on every release.
+It runs in production on a live services business, and versions 0.1.2 through 0.1.10 each shipped from a real finding there (persistence across redeploys, proxy CSRF behavior, edge bot-challenges on payment submits). 1,368 unit tests and a Playwright e2e suite cover it, and the README quickstart is verified against a packed tarball on every release.

@@ -48,6 +48,13 @@ export function envExampleTemplate(): string {
 # EMAIL_PORT=
 # EMAIL_USER=
 # EMAIL_PASS=
+# Set to "ip" for an IP-allowlisted relay (for example Google Workspace SMTP
+# relay): only EMAIL_HOST and EMAIL_PORT are needed and no login is sent.
+# EMAIL_AUTH=
+# Sender address (use one on your site's domain), and an optional display
+# name. Falls back to EMAIL_USER (if it is an address), then NOTIFY_EMAIL.
+# EMAIL_FROM=
+# EMAIL_FROM_NAME=
 
 # ---- IP geolocation (optional; overrides the ipwhois.io default) ----
 # GEO_PROVIDER=

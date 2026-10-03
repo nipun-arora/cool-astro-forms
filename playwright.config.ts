@@ -80,8 +80,31 @@ export const WEBHOOK_RECEIVER_URL = `http://127.0.0.1:${WEBHOOK_RECEIVER_PORT}/h
 // GOOGLE_DRIVE_CLIENT_ID/SECRET/REFRESH_TOKEN values only make
 // `driveConfigured()` true; they are never sent to a real Google endpoint.
 export const RECOVERY_URL = 'http://localhost:4328';
+
+// Admin pages under a Content Security Policy (0.1.15) — the ONLY instance
+// that is a production build (`astro build` + the Express wrapper), because
+// Astro emits its CSP from built output only, never from `astro dev`.
+// `CAF_E2E_CSP=true` turns on `security.csp` in apps/playground's config
+// (env-gated, LESSONS #35). It also carries the admin password and a dummy
+// Stripe key routed to a local mock on ADMIN_CSP_STRIPE_MOCK_PORT, so the
+// built-in "Create payment link" flow renders and can be driven end to end
+// (tests/admin-csp.spec.ts stands the mock up; no live Stripe call).
+export const ADMIN_CSP_URL = 'http://localhost:4329';
+export const ADMIN_CSP_STRIPE_MOCK_PORT = 4394;
 export const DRIVE_MOCK_PORT = 4393;
 export const DRIVE_MOCK_BASE_URL = `http://127.0.0.1:${DRIVE_MOCK_PORT}`;
+
+// Astro 7 changed `astro dev` in two ways that break a suite running several
+// playground dev servers side by side (0.1.15, LESSONS #68). Every
+// foreground `astro dev` writes a lock file in the project's `.astro/` and
+// refuses to start while another dev server of the same project is alive,
+// and under an AI coding agent it detaches into the background, so the
+// command Playwright launched exits at once. `--ignore-lock` skips the lock
+// (no check, no write), and ASTRO_DEV_BACKGROUND, the variable Astro sets on
+// its own background child, skips the agent check, so every instance below
+// runs in the foreground under Playwright's control.
+const PLAYGROUND_DEV = 'npm run dev -w apps/playground -- --ignore-lock';
+const PLAYGROUND_DEV_ENV = { ASTRO_DEV_BACKGROUND: '1' };
 
 export default defineConfig({
   testDir: './tests',
@@ -94,50 +117,54 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'npm run dev -w apps/playground',
+      command: PLAYGROUND_DEV,
       url: DEFAULT_URL,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
-      env: { PORT: '4325' },
+      env: { ...PLAYGROUND_DEV_ENV, PORT: '4325' },
     },
     {
-      command: 'npm run dev -w apps/playground',
+      command: PLAYGROUND_DEV,
       url: TURNSTILE_PASS_URL,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
       env: {
+        ...PLAYGROUND_DEV_ENV,
         PORT: '4322',
         TURNSTILE_SITE_KEY: '1x00000000000000000000AA',
         TURNSTILE_SECRET_KEY: '1x0000000000000000000000000000000AA',
       },
     },
     {
-      command: 'npm run dev -w apps/playground',
+      command: PLAYGROUND_DEV,
       url: TURNSTILE_FAIL_URL,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
       env: {
+        ...PLAYGROUND_DEV_ENV,
         PORT: '4323',
         TURNSTILE_SITE_KEY: '2x00000000000000000000AB',
         TURNSTILE_SECRET_KEY: '2x0000000000000000000000000000000AA',
       },
     },
     {
-      command: 'npm run dev -w apps/playground',
+      command: PLAYGROUND_DEV,
       url: ADMIN_URL,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
       env: {
+        ...PLAYGROUND_DEV_ENV,
         PORT: '4324',
         FORMS_ADMIN_PASSWORD: ADMIN_PASSWORD,
       },
     },
     {
-      command: 'npm run dev -w apps/playground',
+      command: PLAYGROUND_DEV,
       url: PAY_PASS_URL,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
       env: {
+        ...PLAYGROUND_DEV_ENV,
         PORT: '4326',
         STRIPE_SECRET_KEY: 'sk_test_e2e_dummy',
         STRIPE_API_BASE_URL: STRIPE_MOCK_BASE_URL,
@@ -147,11 +174,12 @@ export default defineConfig({
       },
     },
     {
-      command: 'npm run dev -w apps/playground',
+      command: PLAYGROUND_DEV,
       url: PAY_FAIL_URL,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
       env: {
+        ...PLAYGROUND_DEV_ENV,
         PORT: '4327',
         STRIPE_SECRET_KEY: 'sk_test_e2e_dummy',
         STRIPE_API_BASE_URL: STRIPE_MOCK_BASE_URL,
@@ -161,11 +189,12 @@ export default defineConfig({
       },
     },
     {
-      command: 'npm run dev -w apps/playground',
+      command: PLAYGROUND_DEV,
       url: RECOVERY_URL,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
       env: {
+        ...PLAYGROUND_DEV_ENV,
         PORT: '4328',
         CAF_E2E_RECOVERY_ENABLED: 'true',
         GOOGLE_DRIVE_CLIENT_ID: 'e2e-dummy-client-id',
@@ -173,6 +202,21 @@ export default defineConfig({
         GOOGLE_DRIVE_REFRESH_TOKEN: 'e2e-dummy-refresh-token',
         GOOGLE_DRIVE_API_BASE_URL: DRIVE_MOCK_BASE_URL,
         GOOGLE_OAUTH_TOKEN_URL: `${DRIVE_MOCK_BASE_URL}/token`,
+      },
+    },
+    {
+      // Build first (siteUrl and the CSP switch are baked at build time),
+      // then serve the build through apps/playground/server.mjs.
+      command: 'npm run build -w apps/playground && npm start -w apps/playground',
+      url: ADMIN_CSP_URL,
+      reuseExistingServer: !process.env.CI,
+      timeout: 180_000,
+      env: {
+        PORT: '4329',
+        CAF_E2E_CSP: 'true',
+        FORMS_ADMIN_PASSWORD: ADMIN_PASSWORD,
+        STRIPE_SECRET_KEY: 'sk_test_e2e_dummy',
+        STRIPE_API_BASE_URL: `http://127.0.0.1:${ADMIN_CSP_STRIPE_MOCK_PORT}`,
       },
     },
   ],

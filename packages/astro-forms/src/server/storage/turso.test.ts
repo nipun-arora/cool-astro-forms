@@ -80,6 +80,32 @@ describe('TursoStorage — boot/migration', () => {
 // ---------------------------------------------------------------------------
 
 describe('TursoStorage — concurrency (exactly-one-winner)', () => {
+  it('attachPayment: overlapping writes of the same providerRef leave exactly one row (the existence check and the insert are one statement)', async () => {
+    const adapter = new TursoStorage(':memory:');
+    const entry = await adapter.createEntry({
+      siteId: 'site-a',
+      formId: 'form-1',
+      status: 'submitted',
+      fields: {},
+      visitorUuid: 'visitor-1',
+    });
+
+    await Promise.all(
+      Array.from({ length: 4 }, () =>
+        adapter.attachPayment(entry.id, {
+          provider: 'stripe',
+          amountCents: 500,
+          currency: 'usd',
+          status: 'link_created',
+          providerRef: 'cs_concurrent_attach',
+        }),
+      ),
+    );
+
+    const rows = await adapter.getPaymentsByEntry(entry.id);
+    expect(rows.map((row) => row.providerRef)).toEqual(['cs_concurrent_attach']);
+  });
+
   it('markRecoverySent: two overlapping calls for the same entry resolve to exactly one true', async () => {
     const adapter = new TursoStorage(':memory:');
     const entry = await adapter.createEntry({

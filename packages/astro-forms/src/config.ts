@@ -8,6 +8,7 @@
 import { z } from 'zod';
 import { DEFAULT_ALLOWED_CURRENCIES } from './limits.js';
 import { DEFAULT_MIN_AMOUNT_CENTS, DEFAULT_MAX_AMOUNT_CENTS } from './server/payment-constants.js';
+import { isTwoDecimalCurrency } from './server/money.js';
 import {
   DEFAULT_ATTACHMENT_FALLBACK_MAX_BYTES,
   DEFAULT_DRIVE_ROOT_FOLDER,
@@ -97,6 +98,60 @@ const paymentsRequestPageSchema = z
   });
 
 /**
+ * The built-in admin quote flow's currency (0.1.15; it was hardcoded USD).
+ * Lowercased for Stripe. Restricted to two-decimal currencies because the
+ * entry-detail form parses "200.50" as 20050 minor units: for a zero-decimal
+ * currency such as JPY that would charge 100 times the typed amount. A host
+ * that needs another currency creates its own sessions with
+ * `createCheckoutForEntry`, which takes minor units directly.
+ */
+const quoteCurrencySchema = z
+  .string()
+  .toLowerCase()
+  .regex(/^[a-z]{3}$/, 'quoteCurrency must be a three-letter ISO 4217 code')
+  .refine(isTwoDecimalCurrency, {
+    message:
+      'quoteCurrency must be a two-decimal currency: the built-in quote form cannot price zero- or three-decimal currencies (use createCheckoutForEntry instead)',
+  });
+
+/**
+ * What the admin entry-detail page offers for taking a payment (0.1.15):
+ * - `'builtin'` (default): the "Create payment link" form, as before.
+ * - `'off'`: no control, and `/forms-admin/payments/action` is not injected.
+ * - `{ href }`: a "Create a quote" link to the host's own page instead (the
+ *   entry id is appended as `?entry=<id>`); the built-in route is not
+ *   injected. `href` is a site path (`/forms-admin/quote/`) or an http(s)
+ *   URL, never a protocol-relative or `javascript:` value.
+ */
+const adminQuoteSchema = z.union([
+  z.enum(['builtin', 'off']),
+  z.object({
+    href: z
+      .string()
+      .min(1)
+      .refine((href) => isSitePath(href) || /^https?:\/\//i.test(href), {
+        message: 'adminQuote.href must be a site path starting with "/" or an http(s) URL',
+      }),
+  }),
+]);
+
+/**
+ * A path that resolves on the site itself. Resolved the way a browser does
+ * rather than prefix-tested: browsers read `\` as `/` and drop ASCII tab,
+ * CR and LF inside a URL, so `/\evil.com` and `/<TAB>/evil.com` both act
+ * like the protocol-relative `//evil.com` while passing a `//` prefix check.
+ */
+function isSitePath(href: string): boolean {
+  if (!href.startsWith('/')) return false;
+  const probe = 'https://caf.invalid';
+  try {
+    return new URL(href, probe).origin === probe;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * payments config (D3) — inert by default ([] fees). `feePresets` is the
  * named-config-key discretion container for the `?fee=<key>` per-link
  * override: a host can define e.g. `{ noFee: [] }` and a payment-request
@@ -118,10 +173,14 @@ const paymentsConfigSchema = z
     feePresets: z.record(z.string(), z.array(feeLineSchema)).optional(),
     feeOverrides: z.enum(['off', 'query']).default('off'),
     requestPage: paymentsRequestPageSchema,
+    quoteCurrency: quoteCurrencySchema.default('usd'),
+    adminQuote: adminQuoteSchema.default('builtin'),
   })
   .default({
     payLinkFees: [],
     feeOverrides: 'off',
+    quoteCurrency: 'usd',
+    adminQuote: 'builtin',
     requestPage: {
       minAmountCents: DEFAULT_MIN_AMOUNT_CENTS,
       maxAmountCents: DEFAULT_MAX_AMOUNT_CENTS,
@@ -213,10 +272,10 @@ export const coolFormsConfigSchema = z.object({
   storage: storageConfigSchema,
   /**
    * Host-relative module path default-exporting `CafTemplates`
-   * (server/notify.ts) — `{ abandonedLead?, paymentQuote?, paymentReceived? }`,
-   * each `(data) => {subject, text, html?}`. Every key is optional; an
-   * omitted key falls back to this package's own default template for that
-   * email (W3).
+   * (server/notify.ts) — `{ abandonedLead?, paymentQuote?, paymentReceived?,
+   * recovery? }`, each `(data) => {subject, text, html?}`. Every key is
+   * optional; an omitted key falls back to this package's own default
+   * template for that email (W3). `recovery` is honoured from 0.1.15.
    */
   templatesModule: z.string().optional(),
   geo: geoConfigSchema,

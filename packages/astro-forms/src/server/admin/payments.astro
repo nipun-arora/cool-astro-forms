@@ -14,12 +14,16 @@ import type { Payment } from '../../types.js';
 import { logError } from '../log.js';
 import { getDb } from '../storage/db.js';
 import { SqliteStorage } from '../storage/sqlite.js';
-import { parsePaymentFilter, renderAdminPageHtml, renderPaymentsTableHtml } from './_shared.js';
+import { ADMIN_STYLE_HASH, parsePaymentFilter, renderAdminPageHtml, renderPaymentsTableHtml } from './_shared.js';
 
 export const prerender = false;
 
 type ConfigWithTrailingSlash = typeof config & { trailingSlash?: 'always' | 'never' | 'ignore' };
 const trailingSlash = (config as ConfigWithTrailingSlash).trailingSlash;
+
+// 0.1.15: under the host's Astro CSP, allow the admin shell's inline <style>
+// by hash. Only read Astro.csp when CSP is on (it warns per request otherwise).
+if (config.cspEnabled) Astro.csp?.insertStyleHash(ADMIN_STYLE_HASH);
 
 const filter = parsePaymentFilter(Astro.url.searchParams);
 

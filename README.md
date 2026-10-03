@@ -2,7 +2,7 @@
 
 Catch the leads that leave your Astro forms without hitting submit.
 
-When a visitor types into your form and walks away, the lead is saved. Around that capture sits the complete lead-ops platform: recovery emails, quote payments, and a self-hosted admin, with **zero external services by default**, just a SQLite file and your existing SMTP env vars. 1,208 unit tests and a Playwright e2e suite cover it.
+When a visitor types into your form and walks away, the lead is saved. Around that capture sits the complete lead-ops platform: recovery emails, quote payments, and a self-hosted admin, with **zero external services by default**, just a SQLite file and your existing SMTP env vars. 1,368 unit tests and a Playwright e2e suite cover it.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![npm](https://img.shields.io/npm/v/cool-astro-forms.svg)](https://www.npmjs.com/package/cool-astro-forms)
@@ -31,7 +31,7 @@ Every step below is executed end-to-end by [`scripts/verify-quickstart.mjs`](./s
 npm install cool-astro-forms @astrojs/node
 ```
 
-Requires Astro 6 or 7, a server-output adapter, and Node 22.12+. The install compiles `better-sqlite3` natively when no prebuilt binary matches your platform; if that build fails you need Python plus a C toolchain, or skip native modules entirely with the Turso/libSQL path ([docs/serverless.md](./docs/serverless.md)).
+Requires Astro 7.2.8 or a later 7.x release (Astro 6 is not supported), a server-output adapter, and Node 22.12+. The install compiles `better-sqlite3` natively when no prebuilt binary matches your platform; if that build fails you need Python plus a C toolchain, or skip native modules entirely with the Turso/libSQL path ([docs/serverless.md](./docs/serverless.md)).
 
 Optional scaffold first: `init` writes a full `.env.example` (every optional env var this package reads) and appends `data/` to `.gitignore`:
 
@@ -97,6 +97,26 @@ The capture route is auto-injected at `/api/forms/abandon`. A visitor who types 
 > ```
 >
 > Abandonment capture keeps working either way (it posts JSON, which Astro's CSRF check ignores); the break hits admin login and payment form posts.
+
+### Email delivery (SMTP)
+
+Package emails (abandoned-lead alerts, payment quotes and receipts, lead recovery) go out through your own SMTP server, set with environment variables. There are two modes:
+
+| Variable | Credential mode (default) | Relay mode (`EMAIL_AUTH=ip`) |
+|---|---|---|
+| `EMAIL_HOST` | Required | Required |
+| `EMAIL_PORT` | Required | Required. Port 587 must upgrade to TLS (STARTTLS), 465 uses TLS from the start |
+| `EMAIL_USER` | Required | Not used, and never sent |
+| `EMAIL_PASS` | Required | Not used, and never sent |
+| `EMAIL_AUTH` | Leave unset | `ip`: the relay accepts mail from your server's IP address (Google Workspace SMTP relay works this way), so no login is attempted |
+| `EMAIL_FROM` | Optional sender address | Strongly recommended: an address on your site's domain |
+| `EMAIL_FROM_NAME` | Optional display name, such as `Acme Bookings` | Same |
+
+The sender is `EMAIL_FROM`, then `EMAIL_USER` if it is an email address, then `NOTIFY_EMAIL`, then `noreply@cool-astro-forms.local`. `EMAIL_FROM` takes a bare address; the display name goes in `EMAIL_FROM_NAME`. When the sender's domain is not your `siteUrl` domain, the server logs one `notify.from-domain-mismatch` warning, because relays and receiving servers often refuse that mail. If the variables your mode needs are missing, production skips package emails and logs `notify.smtp-unconfigured` once; outside production the emails are printed to the log instead.
+
+### Admin pages under a Content Security Policy
+
+With Astro's `security.csp` turned on, the `/forms-admin` pages stay styled and working: each one registers the hash of its inline stylesheet with Astro, and the payment-link copy button runs from a bundled script rather than inline handlers. If you set your own `Content-Security-Policy` header instead, add `ADMIN_STYLE_HASH` (exported from `cool-astro-forms/server/admin/_shared.js`) to its `style-src`; every admin page, the login page included, uses that one stylesheet. The copy button's script is built by Astro (a small one is inlined), so only Astro's own `security.csp` lists it automatically; under a hand-written header the button may not work, though copying the link by hand still does.
 
 ## How it works
 

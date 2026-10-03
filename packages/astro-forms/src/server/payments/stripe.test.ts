@@ -41,7 +41,11 @@ afterEach(() => {
 });
 
 describe('createPaymentLink', () => {
-  it('builds an ad-hoc price_data line item with entry_id metadata', async () => {
+  // 0.1.15 (fleet bug F1): the expected params gained `restrictions`. Up to
+  // 0.1.14 this test pinned a reusable link, so one quote row could be paid
+  // any number of times while the admin showed a single amount; the link is
+  // now deactivated by Stripe after its first completed checkout.
+  it('builds an ad-hoc price_data line item with entry_id metadata, limited to ONE completed checkout', async () => {
     const create = vi.fn().mockResolvedValue({ id: 'plink_123', url: 'https://buy.stripe.com/test_abc' });
     const client = fakeClient({ paymentLinksCreate: create });
 
@@ -62,6 +66,7 @@ describe('createPaymentLink', () => {
         },
       ],
       metadata: { entry_id: 'entry_1' },
+      restrictions: { completed_sessions: { limit: 1 } },
     });
     expect(result).toEqual({ url: 'https://buy.stripe.com/test_abc', providerRef: 'plink_123' });
   });

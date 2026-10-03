@@ -49,8 +49,8 @@ const SITE_URL = `http://localhost:${PORT}`;
 // scratch project resolving a brand-new, untested Astro major on every run
 // would make this script's pass/fail depend on upstream releases instead of
 // on this package. Bump these alongside apps/playground/package.json.
-const ASTRO_VERSION = '6.4.8';
-const ASTROJS_NODE_VERSION = '10.1.4';
+const ASTRO_VERSION = '7.2.9';
+const ASTROJS_NODE_VERSION = '11.1.4';
 
 const SERVER_READY_TIMEOUT_MS = 30_000;
 

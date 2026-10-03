@@ -91,12 +91,16 @@ describe('POST /api/forms/webhooks/stripe', () => {
     expect(handleInboundPaymentMock).not.toHaveBeenCalled();
   });
 
-  it('a validly-signed checkout.session.completed event resolves 200 and invokes handleInboundPayment with session.id', async () => {
+  // 0.1.15: this exact-shape expectation gained `settlement` (and the payload
+  // its `payment_status`). Up to 0.1.14 it pinned a handler input carrying
+  // no provider-confirmed settlement facts, which is the gap being closed:
+  // the handler had nothing to compare with the stored row.
+  it('a validly-signed checkout.session.completed event resolves 200 and invokes handleInboundPayment with session.id and the settlement facts', async () => {
     const client = new Stripe('sk_test_dummy');
     const payload = JSON.stringify({
       id: 'evt_test_1',
       type: 'checkout.session.completed',
-      data: { object: { id: 'cs_test_1', amount_total: 2500, currency: 'usd' } },
+      data: { object: { id: 'cs_test_1', amount_total: 2500, currency: 'usd', payment_status: 'paid' } },
     });
     const signature = client.webhooks.generateTestHeaderString({ payload, secret: WEBHOOK_SECRET });
 
@@ -112,7 +116,83 @@ describe('POST /api/forms/webhooks/stripe', () => {
       provider: 'stripe',
       amountCents: 2500,
       currency: 'usd',
+      settlement: { paid: true, amountCents: 2500, currency: 'usd' },
     });
+  });
+
+  it('passes paid:false for a session whose payment_status is not "paid" (a delayed method completes unpaid)', async () => {
+    const client = new Stripe('sk_test_dummy');
+    const payload = JSON.stringify({
+      id: 'evt_unpaid',
+      type: 'checkout.session.completed',
+      data: { object: { id: 'cs_unpaid', amount_total: 2500, currency: 'usd', payment_status: 'unpaid' } },
+    });
+    const signature = client.webhooks.generateTestHeaderString({ payload, secret: WEBHOOK_SECRET });
+
+    await POST(makeCtx(payload, { 'stripe-signature': signature }));
+
+    const [input] = handleInboundPaymentMock.mock.calls[0] as [Record<string, unknown>, unknown];
+    expect(input.settlement).toEqual({ paid: false, amountCents: 2500, currency: 'usd' });
+  });
+
+  it('F1: forwards session.payment_link as alternateProviderRef, so a payment made through an admin Payment Link (row keyed plink_…) is found', async () => {
+    const client = new Stripe('sk_test_dummy');
+    const payload = JSON.stringify({
+      id: 'evt_plink',
+      type: 'checkout.session.completed',
+      data: {
+        object: { id: 'cs_plink', payment_link: 'plink_abc', amount_total: 2000, currency: 'usd', payment_status: 'paid' },
+      },
+    });
+    const signature = client.webhooks.generateTestHeaderString({ payload, secret: WEBHOOK_SECRET });
+
+    await POST(makeCtx(payload, { 'stripe-signature': signature }));
+
+    const [input] = handleInboundPaymentMock.mock.calls[0] as [Record<string, unknown>, unknown];
+    expect(input).toMatchObject({ providerRef: 'cs_plink', alternateProviderRef: 'plink_abc' });
+  });
+
+  it('compares in the integration currency when Stripe converted the presentment currency (currency_conversion source values)', async () => {
+    const client = new Stripe('sk_test_dummy');
+    const payload = JSON.stringify({
+      id: 'evt_fx',
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          id: 'cs_fx',
+          amount_total: 68100,
+          currency: 'usd',
+          payment_status: 'paid',
+          currency_conversion: { amount_total: 250000, amount_subtotal: 250000, source_currency: 'aed', fx_rate: '0.2724' },
+        },
+      },
+    });
+    const signature = client.webhooks.generateTestHeaderString({ payload, secret: WEBHOOK_SECRET });
+
+    await POST(makeCtx(payload, { 'stripe-signature': signature }));
+
+    const [input] = handleInboundPaymentMock.mock.calls[0] as [Record<string, unknown>, unknown];
+    expect(input).toMatchObject({
+      amountCents: 250000,
+      currency: 'aed',
+      settlement: { paid: true, amountCents: 250000, currency: 'aed' },
+    });
+  });
+
+  it('handles checkout.session.async_payment_succeeded (a delayed method settling later) like a completion', async () => {
+    const client = new Stripe('sk_test_dummy');
+    const payload = JSON.stringify({
+      id: 'evt_async',
+      type: 'checkout.session.async_payment_succeeded',
+      data: { object: { id: 'cs_async', amount_total: 2500, currency: 'usd', payment_status: 'paid' } },
+    });
+    const signature = client.webhooks.generateTestHeaderString({ payload, secret: WEBHOOK_SECRET });
+
+    const res = await POST(makeCtx(payload, { 'stripe-signature': signature }));
+
+    expect(res.status).toBe(200);
+    const [input] = handleInboundPaymentMock.mock.calls[0] as [Record<string, unknown>, unknown];
+    expect(input).toMatchObject({ providerRef: 'cs_async', eventType: 'checkout.session.async_payment_succeeded' });
   });
 
   it('a bad signature resolves 400 "Webhook Error" and NEVER calls handleInboundPayment (no DB write)', async () => {

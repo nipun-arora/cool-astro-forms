@@ -360,6 +360,34 @@ export function runStorageContract(makeAdapter: () => StorageAdapter): void {
         expect(found?.providerRef).toBe('cs_test_123');
       });
 
+      // One provider session, one row: the webhook marks the row it finds by
+      // providerRef, so a second row for the same session would sit unpaid
+      // beside the paid one forever (createCheckoutForEntry's replay path).
+      it('attachPayment writes at most one row per providerRef: a second payment with the same providerRef is not written', async () => {
+        const entry = await adapter.createEntry(entryInput());
+        const payment = {
+          provider: 'stripe',
+          amountCents: 500,
+          currency: 'usd',
+          status: 'link_created',
+          providerRef: 'cs_once_1',
+          payLinkUrl: 'https://checkout.stripe.com/c/pay/cs_once_1',
+        };
+        await adapter.attachPayment(entry.id, payment);
+        await adapter.attachPayment(entry.id, { ...payment, status: 'paid' });
+
+        const rows = await adapter.getPaymentsByEntry(entry.id);
+        expect(rows.map((row) => [row.providerRef, row.status])).toEqual([['cs_once_1', 'link_created']]);
+      });
+
+      it('attachPayment without a providerRef is never folded: two such payments are two rows', async () => {
+        const entry = await adapter.createEntry(entryInput());
+        await adapter.attachPayment(entry.id, { provider: 'stripe', status: 'link_created', amountCents: 100, currency: 'usd' });
+        await adapter.attachPayment(entry.id, { provider: 'stripe', status: 'link_created', amountCents: 100, currency: 'usd' });
+
+        expect(await adapter.getPaymentsByEntry(entry.id)).toHaveLength(2);
+      });
+
       it('updatePayment flips status link_created -> paid and appends an events entry; the re-read row reflects both', async () => {
         const entry = await adapter.createEntry(entryInput());
         await adapter.attachPayment(entry.id, {
