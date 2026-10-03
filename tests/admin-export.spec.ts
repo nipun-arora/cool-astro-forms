@@ -82,6 +82,43 @@ test.describe('Admin export routes (ADMN-03)', () => {
     expect(body.subarray(0, SQLITE_MAGIC_HEADER.length).equals(SQLITE_MAGIC_HEADER)).toBe(true);
   });
 
+  // A CDN that caches by file extension (Cloudflare caches .csv by default)
+  // would store an authenticated export and serve it to anyone, so every
+  // admin response must forbid shared caching and MIME sniffing, including
+  // the redirects. Redirects are read unfollowed (maxRedirects: 0).
+  test('every admin response carries Cache-Control: no-store, private and X-Content-Type-Options: nosniff', async ({
+    page,
+    request,
+  }) => {
+    const expectAdminHeaders = (headers: Record<string, string>, what: string): void => {
+      expect(headers['cache-control'], what).toBe('no-store, private');
+      expect(headers['x-content-type-options'], what).toBe('nosniff');
+    };
+
+    const guardRedirect = await request.get(`${ADMIN_URL}/forms-admin/export.csv`, { maxRedirects: 0 });
+    expect(guardRedirect.status()).toBeGreaterThanOrEqual(300);
+    expect(guardRedirect.status()).toBeLessThan(400);
+    expectAdminHeaders(guardRedirect.headers(), 'unauthenticated export.csv redirect');
+
+    const loginFailure = await request.post(`${ADMIN_URL}/forms-admin/auth`, {
+      headers: { Origin: ADMIN_URL },
+      form: { password: 'definitely-wrong' },
+      maxRedirects: 0,
+    });
+    expect(loginFailure.headers()['location']).toContain('/forms-admin/login?error=1');
+    expectAdminHeaders(loginFailure.headers(), 'login failure redirect');
+
+    await loginAsAdmin(page);
+    for (const path of ['/forms-admin/export.csv', '/forms-admin/export.db', '/forms-admin/entries']) {
+      const res = await page.request.get(`${ADMIN_URL}${path}`);
+      expect(res.status(), path).toBe(200);
+      expectAdminHeaders(res.headers(), path);
+      if (path.startsWith('/forms-admin/export.')) {
+        expect(res.headers()['content-disposition'], path).toContain('attachment');
+      }
+    }
+  });
+
   test('the Entries view renders the Export CSV and Download .db links', async ({ page }) => {
     await loginAsAdmin(page);
     await page.goto(`${ADMIN_URL}/forms-admin/entries`);

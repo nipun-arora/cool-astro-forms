@@ -2,7 +2,7 @@
 
 Catch the leads that leave your Astro forms without hitting submit.
 
-When a visitor types into your form and walks away, the lead is saved. Around that capture sits the complete lead-ops platform: recovery emails, quote payments, and a self-hosted admin, with **zero external services by default**, just a SQLite file and your existing SMTP env vars. 1,102 unit tests and a Playwright e2e suite cover it.
+When a visitor types into your form and walks away, the lead is saved. Around that capture sits the complete lead-ops platform: recovery emails, quote payments, and a self-hosted admin, with **zero external services by default**, just a SQLite file and your existing SMTP env vars. 1,208 unit tests and a Playwright e2e suite cover it.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/nipun-arora/cool-astro-forms/blob/main/LICENSE)
 [![npm](https://img.shields.io/npm/v/cool-astro-forms.svg)](https://www.npmjs.com/package/cool-astro-forms)

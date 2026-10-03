@@ -102,6 +102,7 @@ import type {
 } from '../../types.js';
 import { PAYMENT_REQUEST_FORM_ID } from '../payment-constants.js';
 import { MIGRATION_SQL } from './migrations.js';
+import { csvCell } from './csv.js';
 import { logError } from '../log.js';
 
 const ulid = monotonicFactory();
@@ -349,14 +350,6 @@ function buildPaymentWhere(filter: PaymentFilter): { clause: string; params: Arg
   }
 
   return { clause: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', params };
-}
-
-/** CSV formula-injection guard (T-01-33) — identical to sqlite.ts's csvCell. */
-function csvCell(value: unknown): string {
-  let s = value === undefined || value === null ? '' : String(value);
-  if (/^[=+\-@]/.test(s)) s = "'" + s;
-  if (/[",\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
-  return s;
 }
 
 function firstRow<T>(rs: ResultSet): T | undefined {

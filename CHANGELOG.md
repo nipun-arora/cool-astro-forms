@@ -9,6 +9,58 @@ below as **BREAKING** rather than held for a 1.0 major.
 
 Entries are newest first.
 
+## [0.1.14] - 2026-10-03
+
+### Security
+
+- The admin CSV export (`/forms-admin/export.csv`) now neutralizes every
+  spreadsheet formula trigger in the OWASP CSV Injection list. Nearly every
+  cell in that file comes from a visitor: field values and field names from
+  an abandoned draft, plus the `User-Agent` and `Referer` headers. Up to
+  0.1.13 the export put a `'` in front of a cell only when it started with
+  `=`, `+`, `-` or `@`, and quoted a cell only when it held a comma, a
+  double quote or a line feed. That left two gaps:
+  - A value starting with a tab, a carriage return or a line feed went out
+    without the `'` prefix.
+  - A bare carriage return inside a value went out unquoted. Spreadsheet
+    importers can treat a bare carriage return as a row break, so a value
+    such as `Thanks` + CR + `=HYPERLINK(...)` could open as a new row whose
+    first cell was a live formula.
+
+  A cell that starts with `=`, `+`, `-`, `@`, a tab, a carriage return or a
+  line feed now gets the `'` prefix, and a cell that contains a comma, a
+  double quote, a carriage return or a line feed is quoted with its inner
+  quotes doubled. Field names in the header row get the same treatment.
+  - **Upgrading:** nothing to change in your config or code, and ordinary
+    values export exactly as before. CSV files exported by an earlier
+    version can still carry a live formula: open old exports in a text
+    editor, or import them with formula evaluation turned off, instead of
+    double-clicking them.
+- Every `/forms-admin/*` response now carries `Cache-Control: no-store,
+  private` and `X-Content-Type-Options: nosniff`: the admin pages, the
+  entry and payment actions, the login page and auth POST (including a
+  failed login), both exports, the session guard's redirect to the login
+  page, and error responses. Before this, the package set no caching
+  headers at all, so a CDN that caches by file extension (Cloudflare caches
+  `.csv` by default) could store an authenticated `export.csv` and serve it
+  to the next visitor who requested that URL. Both exports already sent
+  `Content-Disposition: attachment` and still do. The package's own
+  middleware sets the headers, so no host configuration is needed.
+  - **Upgrading:** nothing to change. If your CDN or proxy has a rule that
+    forces caching and ignores origin `Cache-Control` (for example a
+    "cache everything" rule with an edge TTL override), exclude
+    `/forms-admin/*` from it, and purge any cached `/forms-admin/` URLs
+    once after upgrading.
+
+### Internal
+
+- The SQLite and Turso adapters each kept their own copy of the CSV cell
+  encoder. Both now import one shared `server/storage/csv.ts`, and the
+  export's injection tests moved into the shared adapter contract, so both
+  backends run the same cases. One of them parses the export the way a
+  spreadsheet splits rows and checks that no cell begins with a formula
+  trigger.
+
 ## [0.1.13] - 2026-10-01
 
 ### Security

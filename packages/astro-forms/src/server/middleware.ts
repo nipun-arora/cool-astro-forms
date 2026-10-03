@@ -50,7 +50,9 @@
  * unauthenticated: verifies the signed session cookie, redirects to the
  * login page (adminUrl-built, trailingSlash-correct) on a missing/invalid
  * session, and tags authenticated admin responses `X-Robots-Tag: noindex`
- * (T-02-15). Non-admin traffic is completely unaffected.
+ * (T-02-15). Every `/forms-admin/*` response, guarded or exempt, redirect or
+ * error, also gets `ADMIN_RESPONSE_HEADERS` (0.1.14). Non-admin traffic is
+ * completely unaffected.
  */
 import type { MiddlewareHandler } from 'astro';
 import config from 'virtual:cool-astro-forms/config';
@@ -119,6 +121,28 @@ function stripTrailingSlash(pathname: string): string {
   return pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
 }
 
+/**
+ * Set on EVERY `/forms-admin/*` response (0.1.14): pages, actions, auth,
+ * both exports, the guard's own login redirect, and error responses. A CDN
+ * that caches by file extension (Cloudflare caches `.csv` by default) would
+ * otherwise store an authenticated export and serve it to the next
+ * requester. `no-store, private` forbids any shared or browser cache from
+ * keeping the response; `nosniff` stops a browser from reinterpreting an
+ * export's bytes as a renderable type. Set here, in the package's own
+ * middleware, so no host configuration is needed. Every admin route builds
+ * its response with `new Response(...)` or Astro's `redirect()` (also a
+ * plain `new Response`), so the headers are always mutable here.
+ */
+const ADMIN_RESPONSE_HEADERS: Readonly<Record<string, string>> = {
+  'Cache-Control': 'no-store, private',
+  'X-Content-Type-Options': 'nosniff',
+};
+
+function withAdminHeaders(res: Response): Response {
+  for (const [name, value] of Object.entries(ADMIN_RESPONSE_HEADERS)) res.headers.set(name, value);
+  return res;
+}
+
 /** True for the login page or the auth POST — the two unauthenticated-allowed entry points. */
 function isExemptAdminPath(pathname: string, trailingSlash: ConfigWithTrailingSlash['trailingSlash']): boolean {
   const normalized = stripTrailingSlash(pathname);
@@ -151,8 +175,11 @@ export const onRequest: MiddlewareHandler = async (context, next) => {
     });
 
   const pathname = context.url.pathname;
-  if (!isAdminPath(pathname) || isExemptAdminPath(pathname, cfg.trailingSlash)) {
+  if (!isAdminPath(pathname)) {
     return next();
+  }
+  if (isExemptAdminPath(pathname, cfg.trailingSlash)) {
+    return withAdminHeaders(await next());
   }
 
   // Guard: never let a secret-resolution/verification error crash the
@@ -170,10 +197,10 @@ export const onRequest: MiddlewareHandler = async (context, next) => {
   }
 
   if (!sessionValid) {
-    return context.redirect(adminUrl('/forms-admin/login', cfg.trailingSlash));
+    return withAdminHeaders(context.redirect(adminUrl('/forms-admin/login', cfg.trailingSlash)));
   }
 
   const res = await next();
   res.headers.set('X-Robots-Tag', 'noindex');
-  return res;
+  return withAdminHeaders(res);
 };

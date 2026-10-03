@@ -85,6 +85,18 @@ describe('SqliteStorage — SQLite-specific behavior', () => {
     expect(csv).toContain("'=cmd|calc");
   });
 
+  // Two hand-kept copies of csvCell (sqlite.ts + turso.ts) meant every CSV
+  // injection fix had to land twice, and a fix applied to one copy left the
+  // other backend's export exploitable. One shared module, imported by both,
+  // is the only shape where the contract suite's guard tests prove both.
+  it('both storage adapters import the one shared csvCell from ./csv.js and keep no local copy (source assertion)', () => {
+    for (const file of ['./sqlite.ts', './turso.ts']) {
+      const source = fs.readFileSync(new URL(file, import.meta.url), 'utf8');
+      expect(source, file).toMatch(/import \{ csvCell \} from '\.\/csv\.js';/);
+      expect(source, file).not.toMatch(/function csvCell\(/);
+    }
+  });
+
   it('skips a corrupted JSON row and logs storage.corrupt-row instead of throwing', async () => {
     const entry = await adapter.createEntry({
       siteId: 'site-a',

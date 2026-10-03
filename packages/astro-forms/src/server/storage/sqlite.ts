@@ -30,6 +30,7 @@ import type {
   PaymentStatus,
 } from '../../types.js';
 import { PAYMENT_REQUEST_FORM_ID } from '../payment-constants.js';
+import { csvCell } from './csv.js';
 import { getDb } from './db.js';
 import { logError } from '../log.js';
 
@@ -286,18 +287,6 @@ function buildPaymentWhere(filter: PaymentFilter): { clause: string; params: unk
   }
 
   return { clause: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
-}
-
-/**
- * CSV formula-injection guard (T-01-33): any cell whose stringified value
- * starts with `=`, `+`, `-`, or `@` is prefixed with a leading single quote
- * before standard CSV quoting is applied.
- */
-function csvCell(value: unknown): string {
-  let s = value === undefined || value === null ? '' : String(value);
-  if (/^[=+\-@]/.test(s)) s = `'${s}`;
-  if (/[",\n]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
-  return s;
 }
 
 export class SqliteStorage implements StorageAdapter {

@@ -23,6 +23,8 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │        │                /api/forms/recovery-unsubscribe (only when recovery.enabled)
 │        ├─ addMiddleware(order:'pre') → registerRuntimeConfig (CAF_DB_PATH, CAF_GEO_*, CAF_DRIVE_* bridge, boot purgeExpired)
 │        │                              + admin session guard (exact-segment /forms-admin matcher)
+│        │                              + 0.1.14: Cache-Control: no-store, private + X-Content-Type-Options: nosniff on EVERY
+│        │                                /forms-admin/* response (exempt login/auth, guard redirects, errors, exports)
 │        │                              + Phase 4: maybeRunRecoverySweep (fire-and-forget, self-gated, every request)
 │        └─ vite plugin: virtual:cool-astro-forms/config = resolved config + trailingSlash (+ templatesModule import)
 │
@@ -118,7 +120,7 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │    storage/ — StorageAdapter (ASYNC interface — Postgres/Turso portability locked at review):
 │         createEntry/updateEntry/findAbandoned(siteId,…)/upsertAbandoned/convertAndCreateSubmitted/
 │         listEntries(filter+limit/offset)/countEntries/getEntryById/deleteEntry/attachPayment/attachFiles/
-│         exportCsv(formula-injection-escaped)/purgeVisitor(cascades, Phase 4: EXCLUDES recovery_suppressions —
+│         exportCsv(formula-injection-escaped by the one shared storage/csv.ts csvCell, OWASP set)/purgeVisitor(cascades, Phase 4: EXCLUDES recovery_suppressions —
 │         D4a)/purgeExpired/recordFormStart/getFunnel/getTopDropOff (Phase 3 adds payment CRUD +
 │         appendPaymentEventIfAbsent; Phase 4 adds getFilesByEntry/findRecoverableEntries/markConsent/
 │         markRecoverySent(atomic claim)/suppressRecovery/isRecoverySuppressed)

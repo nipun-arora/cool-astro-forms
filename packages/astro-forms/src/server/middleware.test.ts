@@ -294,6 +294,116 @@ describe('onRequest — admin guard', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Admin response headers (0.1.14). Every /forms-admin/* response holds
+// either lead data, a session, or a redirect that reveals the admin exists.
+// A CDN that caches by file extension (Cloudflare caches .csv by default)
+// would store an authenticated export and hand it to the next requester, so
+// every admin response, including redirects and errors, must forbid shared
+// caching and MIME sniffing. The package sets this itself: no host config.
+// ---------------------------------------------------------------------------
+
+describe('onRequest — admin response headers (no-store, nosniff)', () => {
+  beforeEach(() => {
+    resetRuntimeConfigRegistration();
+    fakeStorage.purgeExpired.mockReset().mockResolvedValue(0);
+    resolveAdminSecretMock.mockClear().mockReturnValue('test-secret');
+    verifySessionMock.mockReset().mockReturnValue(false);
+    mockConfig.trailingSlash = undefined;
+  });
+
+  function expectAdminHeaders(res: Response): void {
+    expect(res.headers.get('Cache-Control')).toBe('no-store, private');
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
+  }
+
+  it.each([
+    [
+      'an authenticated export.csv',
+      '/forms-admin/export.csv',
+      () =>
+        new Response('id,siteId\n1,demo-site', {
+          headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="entries.csv"' },
+        }),
+    ],
+    [
+      'an authenticated export.db',
+      '/forms-admin/export.db',
+      () =>
+        new Response(new Uint8Array([1, 2, 3]), {
+          headers: { 'content-type': 'application/vnd.sqlite3', 'content-disposition': 'attachment; filename="forms.db"' },
+        }),
+    ],
+    [
+      'an authenticated entries page',
+      '/forms-admin/entries',
+      () => new Response('<html>entries</html>', { headers: { 'content-type': 'text/html' } }),
+    ],
+    ['an authenticated route error (500)', '/forms-admin/export.csv', () => new Response(null, { status: 500 })],
+    [
+      'an authenticated action redirect',
+      '/forms-admin/entries/action',
+      () => new Response(null, { status: 302, headers: { Location: '/forms-admin/entries' } }),
+    ],
+  ])('stamps %s', async (_name, pathname, makeResponse) => {
+    verifySessionMock.mockReturnValue(true);
+    const context = makeContext(pathname, { cookieValue: 'valid.sig' });
+    const res = (await onRequest(context as never, vi.fn(async () => makeResponse()))) as Response;
+    expectAdminHeaders(res);
+  });
+
+  it('keeps the exports Content-Disposition: attachment while stamping them', async () => {
+    verifySessionMock.mockReturnValue(true);
+    const context = makeContext('/forms-admin/export.csv', { cookieValue: 'valid.sig' });
+    const next = vi.fn(
+      async () =>
+        new Response('id', { headers: { 'content-disposition': 'attachment; filename="entries.csv"' } }),
+    );
+    const res = (await onRequest(context as never, next)) as Response;
+    expect(res.headers.get('Content-Disposition')).toBe('attachment; filename="entries.csv"');
+    expectAdminHeaders(res);
+  });
+
+  it('stamps the guard redirect for an unauthenticated export.csv request', async () => {
+    const context = makeContext('/forms-admin/export.csv');
+    const res = (await onRequest(context as never, vi.fn(async () => new Response('secret')))) as Response;
+    expect(res.headers.get('Location')).toBe('/forms-admin/login');
+    expectAdminHeaders(res);
+  });
+
+  it('stamps the fail-closed redirect when secret resolution throws', async () => {
+    resolveAdminSecretMock.mockImplementationOnce(() => {
+      throw new Error('fs unavailable');
+    });
+    const context = makeContext('/forms-admin/entries', { cookieValue: 'valid.sig' });
+    const res = (await onRequest(context as never, vi.fn(async () => new Response('secret')))) as Response;
+    expectAdminHeaders(res);
+  });
+
+  it('stamps a login failure (the auth POST redirecting back to login?error=1)', async () => {
+    const context = makeContext('/forms-admin/auth');
+    const next = vi.fn(
+      async () => new Response(null, { status: 302, headers: { Location: '/forms-admin/login?error=1' } }),
+    );
+    const res = (await onRequest(context as never, next)) as Response;
+    expectAdminHeaders(res);
+  });
+
+  it('stamps the unauthenticated login page', async () => {
+    const context = makeContext('/forms-admin/login');
+    const res = (await onRequest(context as never, vi.fn(async () => new Response('login-page')))) as Response;
+    expectAdminHeaders(res);
+  });
+
+  it("leaves a non-admin response's caching headers to the host", async () => {
+    const context = makeContext('/blog/post');
+    const next = vi.fn(async () => new Response('ok', { headers: { 'Cache-Control': 'public, max-age=600' } }));
+    const res = (await onRequest(context as never, next)) as Response;
+    expect(res.headers.get('Cache-Control')).toBe('public, max-age=600');
+    expect(res.headers.get('X-Content-Type-Options')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // RCV-01 lazy sweep piggyback (Phase 4/04-06)
 // ---------------------------------------------------------------------------
 
