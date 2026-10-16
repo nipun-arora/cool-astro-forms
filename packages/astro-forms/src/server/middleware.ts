@@ -38,6 +38,14 @@
  *     `cfg.recovery.enabled` is false. Piggybacking on real request traffic
  *     (rather than `setTimeout`) is deliberate: Passenger recycles idle
  *     workers, silently dropping any timer-based schedule mid-flight.
+ *  6b. Fires the deferred abandoned-lead alert sweep
+ *     (`maybeRunAbandonAlertSweep`, 0.1.18) on every request, in the same
+ *     fire-and-forget chain: self-gated once per
+ *     `ABANDON_ALERT_SWEEP_INTERVAL_MS` per process and, unlike recovery,
+ *     NEVER gated on `cfg.recovery.enabled` (the owner's alert is not a
+ *     recovery feature, and the live sites run with recovery off). A quiet
+ *     site therefore sends a due alert with its next request: at or after
+ *     the delay, never before.
  *  7. Runs `assertExplicitSecrets(cfg)` (D2 fix #2, 05-01/ADPT-01) — a
  *     no-op unless `CAF_REQUIRE_EXPLICIT_SECRETS` is truthy, in which case
  *     it THROWS on request #1 if a required secret is absent instead of
@@ -62,6 +70,7 @@ import config from 'virtual:cool-astro-forms/config';
 import type { CoolFormsConfig } from '../config.js';
 import { adminUrl } from './admin/_shared.js';
 import { logError } from './log.js';
+import { maybeRunAbandonAlertSweep } from './recovery/abandon-alerts.js';
 import { maybeRunRecoverySweep } from './recovery/sweep.js';
 import { resolveAdminSecret } from './security/admin-secret.js';
 import { verifySession } from './security/admin-session.js';
@@ -172,8 +181,13 @@ export const onRequest: MiddlewareHandler = async (context, next) => {
   // sync-construct predecessor could only ever fail by throwing straight
   // out of onRequest; this fire-and-forget chain must log instead of
   // producing an unhandled rejection.
+  // 0.1.18: the deferred abandoned-lead alert sweep rides the same chain
+  // (item 6b above) and runs whether or not recovery is enabled.
   void getStorageAdapter(cfg)
-    .then((storage) => maybeRunRecoverySweep({ storage, config: cfg }))
+    .then((storage) => {
+      maybeRunRecoverySweep({ storage, config: cfg });
+      maybeRunAbandonAlertSweep({ storage, config: cfg });
+    })
     .catch((err: unknown) => {
       logError('storage.recovery-sweep-acquire-failed', err);
     });

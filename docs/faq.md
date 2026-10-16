@@ -8,7 +8,7 @@ No. It requires Astro 7.2.8 or a later 7.x release with `output: 'server'` and a
 
 ## How does form-abandonment capture work?
 
-An injected client script stages field values as the visitor types (passwords and card-shaped fields are never staged). When one of four triggers fires (exit intent, external-link click, `beforeunload`, or the tab going hidden), the staged fields POST to `/api/forms/abandon`. The server gates the save with an origin check, rate limit, honeypot, and an email-or-phone requirement, then writes one SQLite row with the visitor's journey trail and IP geolocation attached and sends you a notification email.
+An injected client script stages field values as the visitor types (passwords and card-shaped fields are never staged). When one of four triggers fires (exit intent, external-link click, `beforeunload`, or the tab going hidden), the staged fields POST to `/api/forms/abandon`. The server gates the save with an origin check, rate limit, honeypot, and an email-or-phone requirement, then writes one SQLite row with the visitor's journey trail and IP geolocation attached. The notification email (and the `entry.abandoned` webhook) follow after `abandonment.alertDelayMins` (default 15 minutes), and a real submission inside that window cancels them, so a visitor who only switched tabs does not produce a false "abandoned" alert.
 
 ## How is cool-astro-forms different from Formspree or Netlify Forms?
 

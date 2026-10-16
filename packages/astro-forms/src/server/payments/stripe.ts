@@ -94,6 +94,11 @@ export interface CreatePaymentLinkResult {
  * cannot take an existing `customer` (API limitation), so a repeat payer gets
  * a new Customer per link. `customerEmail` is appended as `prefilled_email`.
  *
+ * No `receipt_email` (0.1.18): unlike a Checkout Session, the Payment Links
+ * API's `payment_intent_data` does not accept one, so a link payer gets a
+ * Stripe receipt only when the dashboard's "Successful payments" customer
+ * email setting is on.
+ *
  * The returned `providerRef` is the LINK id (`plink_…`); the Checkout
  * Session a payer completes gets its own `cs_…` id at pay time, so the
  * Stripe webhook matches these rows through `session.payment_link` (0.1.15,
@@ -153,6 +158,12 @@ export interface CreateCheckoutSessionInput {
    * payer's own name.
    */
   customerName?: string;
+  /**
+   * `config.payments.payerReceipts` (0.1.18). `'always'` (also when absent)
+   * sends `customerEmail` as `receipt_email`; `'dashboard'` never sends it,
+   * so the dashboard's "Successful payments" setting alone decides.
+   */
+  payerReceipts?: 'always' | 'dashboard';
 }
 
 export interface CreateCheckoutSessionResult {
@@ -196,6 +207,22 @@ export interface CreateCheckoutSessionResult {
  * PaymentIntent, which is what Stripe's Payments list shows;
  * `client_reference_id` puts the entry id on the dashboard's session view
  * and exports.
+ *
+ * Payer receipt (0.1.18): when the payer's email is known,
+ * `payment_intent_data.receipt_email` is set to the same normalized address.
+ * Stripe documents that a live-mode payment with `receipt_email` gets a
+ * receipt regardless of the dashboard's customer email settings (test mode
+ * never sends automatic receipts). Up to 0.1.17 the pay page promised "Your
+ * receipt goes here." while a receipt went out only if the "Successful
+ * payments" setting was on. With no email, nothing is set: Checkout collects
+ * one, and the dashboard setting decides.
+ *
+ * That override cuts both ways: a merchant who turned Stripe receipts off on
+ * purpose gets them sent anyway, and a card tester can make the account mail
+ * branded receipts to addresses typed on the pay page. `payerReceipts:
+ * 'dashboard'` (config `payments.payerReceipts`) therefore never sends
+ * `receipt_email`; only the receipt field changes, the customer fields stay
+ * as above.
  */
 export async function createCheckoutSession(
   input: CreateCheckoutSessionInput,
@@ -238,6 +265,7 @@ export async function createCheckoutSession(
     payment_intent_data: {
       metadata: { entry_id: input.entryId },
       description: input.memo ?? 'Payment',
+      ...(customerEmail && input.payerReceipts !== 'dashboard' ? { receipt_email: customerEmail } : {}),
     },
     ...(customerId
       ? {

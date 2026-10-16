@@ -752,6 +752,212 @@ export function runStorageContract(makeAdapter: () => StorageAdapter): void {
       });
     });
 
+    // -------------------------------------------------------------------
+    // Deferred abandoned-lead alert (0.1.18). The capture sends an abandon
+    // beacon on a mere tab switch, so the owner's "abandoned" alert and the
+    // entry.abandoned webhook wait until a due time stored on the row, and a
+    // real submission in the meantime cancels them. These cases pin the
+    // storage half: when an alert is due, that it can be claimed exactly
+    // once, never early, and never for a draft a submission promoted.
+    // -------------------------------------------------------------------
+    describe('deferred abandoned-lead alert (0.1.18)', () => {
+      const T = 1_000_000_000;
+
+      async function dueIds(now: number): Promise<string[]> {
+        return (await adapter.findDueAbandonAlerts!(now, 25)).map((alert) => alert.entry.id);
+      }
+
+      it('implements both alert methods (the abandon handler only defers when both exist)', () => {
+        expect(typeof adapter.findDueAbandonAlerts).toBe('function');
+        expect(typeof adapter.claimAbandonAlert).toBe('function');
+      });
+
+      it('a scheduled draft is not due one millisecond before its due time and is due at it, as a first alert', async () => {
+        const created = await adapter.upsertAbandoned(upsertInput(), 60, { dueAt: T });
+        const id = created.entry!.id;
+
+        expect(await dueIds(T - 1)).not.toContain(id);
+        const due = await adapter.findDueAbandonAlerts!(T, 25);
+        expect(due.map((alert) => alert.entry.id)).toEqual([id]);
+        expect(due[0]?.alertedBefore).toBe(false);
+        expect(due[0]?.entry.fields).toEqual({ email: 'visitor@example.com' });
+      });
+
+      it('a draft saved with no schedule (delay 0, or a row from before 0.1.18) is never due, so an upgrade cannot mass-alert old rows', async () => {
+        await adapter.upsertAbandoned(upsertInput(), 60);
+        await adapter.createEntry(entryInput({ visitorUuid: 'visitor-legacy' }));
+        expect(await dueIds(T * 10)).toEqual([]);
+      });
+
+      it('a dedupe update keeps the due time fixed at the first abandon (a second tab switch never pushes the alert back or adds one)', async () => {
+        const first = await adapter.upsertAbandoned(upsertInput({ fields: { email: 'a@example.com' } }), 60, { dueAt: T });
+        const second = await adapter.upsertAbandoned(upsertInput({ fields: { email: 'b@example.com' } }), 60, {
+          dueAt: T + 600_000,
+          rearmOnUpdate: true,
+        });
+        expect(second.outcome).toBe('updated');
+        expect(second.entry?.id).toBe(first.entry?.id);
+
+        const due = await adapter.findDueAbandonAlerts!(T, 25);
+        expect(due.map((alert) => alert.entry.id)).toEqual([first.entry!.id]);
+        // The alert carries the latest draft, read at send time.
+        expect(due[0]?.entry.fields).toEqual({ email: 'b@example.com' });
+      });
+
+      it('claimAbandonAlert claims once: the first claim wins, a second returns false, and the row is no longer due', async () => {
+        const id = (await adapter.upsertAbandoned(upsertInput(), 60, { dueAt: T })).entry!.id;
+
+        expect(await adapter.claimAbandonAlert!(id, T)).toBe(true);
+        expect(await adapter.claimAbandonAlert!(id, T + 1)).toBe(false);
+        expect(await dueIds(T * 10)).toEqual([]);
+      });
+
+      it('claimAbandonAlert refuses a claim before the due time (an alert never goes out early)', async () => {
+        const id = (await adapter.upsertAbandoned(upsertInput(), 60, { dueAt: T })).entry!.id;
+        expect(await adapter.claimAbandonAlert!(id, T - 1)).toBe(false);
+        expect(await dueIds(T)).toEqual([id]);
+      });
+
+      it('a submission that promotes the draft cancels its pending alert, even when a sweep already listed it', async () => {
+        const id = (await adapter.upsertAbandoned(upsertInput(), 60, { dueAt: T })).entry!.id;
+        expect(await dueIds(T)).toEqual([id]); // a sweep listed it...
+
+        await adapter.convertAndCreateSubmitted(upsertInput(), 60 * 60_000);
+
+        expect(await adapter.claimAbandonAlert!(id, T)).toBe(false); // ...and loses the claim
+        expect(await dueIds(T * 10)).toEqual([]);
+      });
+
+      it('notifyOnUpdate: an update after the alert went out re-arms one more alert, marked alertedBefore', async () => {
+        const id = (await adapter.upsertAbandoned(upsertInput(), 60, { dueAt: T })).entry!.id;
+        expect(await adapter.claimAbandonAlert!(id, T)).toBe(true);
+
+        await adapter.upsertAbandoned(upsertInput({ fields: { email: 'later@example.com' } }), 60, {
+          dueAt: T + 900_000,
+          rearmOnUpdate: true,
+        });
+
+        expect(await dueIds(T + 899_999)).toEqual([]);
+        const due = await adapter.findDueAbandonAlerts!(T + 900_000, 25);
+        expect(due.map((alert) => alert.entry.id)).toEqual([id]);
+        expect(due[0]?.alertedBefore).toBe(true);
+        expect(await adapter.claimAbandonAlert!(id, T + 900_000)).toBe(true);
+      });
+
+      // A row with both alert columns NULL was alerted on the save itself: a
+      // 0.1.17 save (alert + entry.abandoned sent inline, then migrated), or
+      // a save made while alertDelayMins was 0. A notifyOnUpdate re-arm must
+      // record that alert (`notifiedAt ?? createdAt`, alertAfterDedupeUpdate),
+      // or the sweep would treat the re-alert as a first one and fire
+      // entry.abandoned for that draft a second time.
+      it('notifyOnUpdate: re-arming a draft alerted on the save itself (no alert columns) marks the alert alertedBefore, so entry.abandoned is not fired twice', async () => {
+        const id = (await adapter.upsertAbandoned(upsertInput(), 60)).entry!.id;
+
+        await adapter.upsertAbandoned(upsertInput({ fields: { email: 'later@example.com' } }), 60, {
+          dueAt: T,
+          rearmOnUpdate: true,
+        });
+
+        expect(await dueIds(T - 1)).toEqual([]);
+        const due = await adapter.findDueAbandonAlerts!(T, 25);
+        expect(due.map((alert) => alert.entry.id)).toEqual([id]);
+        expect(due[0]?.alertedBefore).toBe(true);
+        expect(due[0]?.entry.fields).toEqual({ email: 'later@example.com' });
+      });
+
+      it('without notifyOnUpdate an update after the alert went out schedules nothing', async () => {
+        const id = (await adapter.upsertAbandoned(upsertInput(), 60, { dueAt: T })).entry!.id;
+        expect(await adapter.claimAbandonAlert!(id, T)).toBe(true);
+
+        await adapter.upsertAbandoned(upsertInput({ fields: { email: 'later@example.com' } }), 60, { dueAt: T + 900_000 });
+        expect(await dueIds(T * 10)).toEqual([]);
+      });
+
+      it('lists due alerts oldest due time first and honors the limit', async () => {
+        const late = (await adapter.upsertAbandoned(upsertInput({ visitorUuid: 'v-late' }), 60, { dueAt: T + 2 })).entry!.id;
+        const early = (await adapter.upsertAbandoned(upsertInput({ visitorUuid: 'v-early' }), 60, { dueAt: T })).entry!.id;
+        const mid = (await adapter.upsertAbandoned(upsertInput({ visitorUuid: 'v-mid' }), 60, { dueAt: T + 1 })).entry!.id;
+
+        const due = await adapter.findDueAbandonAlerts!(T + 10, 2);
+        expect(due.map((alert) => alert.entry.id)).toEqual([early, mid]);
+        expect(due.map((alert) => alert.entry.id)).not.toContain(late);
+      });
+
+      // A bot can queue thousands of cheap drafts that fail Turnstile (soft-
+      // fail: saved, flagged `fields._turnstile`, still alerted). Listed
+      // oldest-first, a backlog bigger than one sweep batch held every
+      // genuine alert queued behind it back for hours. Flagged drafts now go
+      // last, so the batch limit only ever delays other flagged drafts.
+      it('lists Turnstile-flagged drafts after every clean one, so a bot backlog bigger than one batch cannot hold back a genuine alert', async () => {
+        const flagged: string[] = [];
+        for (let i = 0; i < 26; i++) {
+          const id = (await adapter.upsertAbandoned(upsertInput({ visitorUuid: 'v-bot-' + i }), 60, { dueAt: T + i })).entry!.id;
+          // The flag exactly as handle-abandon.ts writes it on a failed check.
+          await adapter.updateEntry(id, { fields: { email: 'visitor@example.com', _turnstile: 'failed' } });
+          flagged.push(id);
+        }
+        const clean = (await adapter.upsertAbandoned(upsertInput({ visitorUuid: 'v-human' }), 60, { dueAt: T + 100 })).entry!.id;
+
+        const due = await adapter.findDueAbandonAlerts!(T + 1000, 25);
+        expect(due.map((alert) => alert.entry.id)).toEqual([clean, ...flagged.slice(0, 24)]);
+        expect(due[1]?.entry.fields).toEqual({ email: 'visitor@example.com', _turnstile: 'failed' });
+
+        // The flagged backlog still drains, oldest due first, once no clean alert is waiting.
+        expect(await adapter.claimAbandonAlert!(clean, T + 1000)).toBe(true);
+        expect((await adapter.findDueAbandonAlerts!(T + 1000, 25)).map((alert) => alert.entry.id)).toEqual(flagged.slice(0, 25));
+      });
+
+      // A flagged bot draft keeps sending beacons, and each one resends the
+      // whole form, which never carries `_turnstile` (the server writes it).
+      // A dedupe update that replaced the fields wholesale dropped the flag,
+      // the draft sorted with clean ones again, and a bot backlog could
+      // again hold genuine alerts back.
+      it('a dedupe update keeps the Turnstile flag, so the flagged draft is still listed after a clean one', async () => {
+        const bot = (await adapter.upsertAbandoned(upsertInput({ visitorUuid: 'v-bot' }), 60, { dueAt: T })).entry!.id;
+        // The flag exactly as handle-abandon.ts writes it on a failed check.
+        await adapter.updateEntry(bot, { fields: { email: 'visitor@example.com', _turnstile: 'failed' } });
+
+        const updated = await adapter.upsertAbandoned(
+          upsertInput({ visitorUuid: 'v-bot', fields: { email: 'bot@example.com' } }),
+          60,
+          { dueAt: T + 600_000 },
+        );
+        expect(updated.outcome).toBe('updated');
+        expect(updated.entry?.fields).toEqual({ email: 'bot@example.com', _turnstile: 'failed' });
+
+        const clean = (await adapter.upsertAbandoned(upsertInput({ visitorUuid: 'v-human' }), 60, { dueAt: T + 100 })).entry!.id;
+        const due = await adapter.findDueAbandonAlerts!(T + 1000, 25);
+        expect(due.map((alert) => alert.entry.id)).toEqual([clean, bot]);
+        expect(due[1]?.entry.fields).toEqual({ email: 'bot@example.com', _turnstile: 'failed' });
+      });
+
+      // The flag is the server's Turnstile verdict, not form data, so a
+      // beacon's own `_turnstile` must not reach the row on either branch.
+      it('a beacon cannot set, replace or clear the Turnstile flag itself: a client-sent _turnstile is dropped and the stored one kept', async () => {
+        const spoofed = await adapter.upsertAbandoned(
+          upsertInput({ visitorUuid: 'v-spoof', fields: { email: 'a@example.com', _turnstile: 'failed' } }),
+          60,
+          { dueAt: T },
+        );
+        expect(spoofed.entry?.fields).toEqual({ email: 'a@example.com' });
+        const setOnUpdate = await adapter.upsertAbandoned(
+          upsertInput({ visitorUuid: 'v-spoof', fields: { email: 'b@example.com', _turnstile: 'failed' } }),
+          60,
+          { dueAt: T },
+        );
+        expect(setOnUpdate.entry?.fields).toEqual({ email: 'b@example.com' });
+
+        const bot = (await adapter.upsertAbandoned(upsertInput({ visitorUuid: 'v-bot' }), 60, { dueAt: T })).entry!.id;
+        await adapter.updateEntry(bot, { fields: { email: 'visitor@example.com', _turnstile: 'failed' } });
+        const replaced = await adapter.upsertAbandoned(
+          upsertInput({ visitorUuid: 'v-bot', fields: { email: 'bot@example.com', _turnstile: 'passed' } }),
+          60,
+          { dueAt: T },
+        );
+        expect(replaced.entry?.fields).toEqual({ email: 'bot@example.com', _turnstile: 'failed' });
+      });
+    });
+
     describe('purgeExpired', () => {
       it('deletes only status=abandoned rows older than the cutoff; submitted/converted survive', async () => {
         vi.useFakeTimers();

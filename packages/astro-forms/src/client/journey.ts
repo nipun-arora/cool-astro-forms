@@ -9,6 +9,7 @@
  */
 import { JOURNEY_MAX_AGE_MS, JOURNEY_MAX_BYTES, JOURNEY_MAX_STEPS } from '../limits.js';
 import type { JourneyStep } from '../types.js';
+import { hasConsent } from './visitor.js';
 
 const STORAGE_KEY = '_caf_journey';
 
@@ -251,7 +252,30 @@ export function recordPageView(input: RecordPageViewInput): JourneyStep[] {
 
 let pageLoadListenerRegistered = false;
 
-function recordCurrentPageView(): void {
+/**
+ * 0.1.18: honours `requireConsent` through the SAME gate capture.ts uses
+ * (visitor.ts hasConsent). Without consent NOTHING is recorded — not to
+ * localStorage, not to the in-memory fallback — and earlier pages are never
+ * backfilled: the trail starts at the first page view recorded after consent.
+ * A trail stored by <=0.1.17 (written before any consent check existed, up to
+ * 365 days old) is CLEARED while consent is missing, so it cannot ship with
+ * the first abandon payload after the visitor consents. Removing stored data
+ * needs no consent.
+ * Exported so the consent path (`window.caf.consentGranted()`, after
+ * grantConsent()) can start the trail on the page where consent was given
+ * instead of waiting for the next navigation. NOT idempotent for the page
+ * already at the end of the trail: pushStep's same-url dedupe replaces that
+ * step and moves its `ts`, skewing the server-computed durations. Callers
+ * that may fire repeatedly (capture.ts consentGranted) skip the call when the
+ * current page is already the trail's last step.
+ */
+export function recordCurrentPageView(): void {
+  if (typeof document === 'undefined') return;
+  const requireConsent = typeof window !== 'undefined' && window.__cafConfig?.requireConsent === true;
+  if (!hasConsent({ requireConsent })) {
+    clearTrail();
+    return;
+  }
   const journeyParams = typeof window !== 'undefined' && window.__cafConfig?.journeyParams === true;
   recordPageView({
     url: location.href,

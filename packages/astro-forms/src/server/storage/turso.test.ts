@@ -6,6 +6,7 @@ import type { Client } from '@libsql/client';
 import { runStorageContract } from './adapter.contract.js';
 import { TursoStorage } from './turso.js';
 import { MIGRATION_SQL } from './migrations.js';
+import { DUE_ABANDON_ALERTS_SQL } from './adapter.js';
 
 // ---------------------------------------------------------------------------
 // Generic contract — the EXACT same suite sqlite.test.ts runs, unmodified,
@@ -49,12 +50,15 @@ describe('TursoStorage — boot/migration', () => {
   });
 
   it('MIGRATION_SQL is the single source both backends walk (source assertion, mirrors sqlite.test.ts)', () => {
-    expect(MIGRATION_SQL.length).toBe(6);
+    expect(MIGRATION_SQL.length).toBe(7);
     expect(MIGRATION_SQL[4]).toContain('rate_limits');
     expect(MIGRATION_SQL[4]).toContain('bucket_key');
     // 0.1.17: the Stripe customer columns ride the same list, so Turso gets them without its own DDL.
     expect(MIGRATION_SQL[5]).toContain('customer_ref');
     expect(MIGRATION_SQL[5]).toContain('payer_email');
+    // 0.1.18: the deferred abandoned-lead alert columns, same list again.
+    expect(MIGRATION_SQL[6]).toContain('abandon_notify_due_at');
+    expect(MIGRATION_SQL[6]).toContain('abandon_notified_at');
   });
 
   it('two independent :memory: TursoStorage instances do not share state (each gets its own private in-process database)', async () => {
@@ -210,12 +214,93 @@ describe('TursoStorage — concurrency (exactly-one-winner)', () => {
     expect(after?.events).toHaveLength(1);
   });
 
+  // 0.1.18: two sweeps (two serverless instances, or a slow sweep overlapped
+  // by the next one) both list the same due alert; only one may email it.
+  it('claimAbandonAlert: N overlapping claims of one due alert resolve to exactly one true', async () => {
+    const adapter = new TursoStorage(':memory:');
+    const created = await adapter.upsertAbandoned(
+      { siteId: 'site-a', formId: 'form-1', fields: { email: 'lead@example.com' }, visitorUuid: 'visitor-1' },
+      60,
+      { dueAt: 1_000 },
+    );
+
+    const results = await Promise.all(Array.from({ length: 6 }, () => adapter.claimAbandonAlert(created.entry!.id, 2_000)));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await adapter.findDueAbandonAlerts(Number.MAX_SAFE_INTEGER, 25)).toEqual([]);
+  });
+
   it('consumeRateLimitToken: N overlapping calls against a single-token bucket resolve to exactly one true', async () => {
     const adapter = new TursoStorage(':memory:');
     const results = await Promise.all(
       Array.from({ length: 8 }, () => adapter.consumeRateLimitToken('concurrent-bucket', 1, 0, 1_000_000)),
     );
     expect(results.filter(Boolean)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Connection failure (0.1.18). getStorageAdapter now keeps one TursoStorage
+// per database, and a request that only fires a background job (the
+// middleware's sweeps) may construct one and never call a method on it. A
+// failed connect must not then surface as an 'unhandledRejection', which
+// ends the process under Node's default policy; every method still sees the
+// error, and `ready` lets the factory drop the dead instance.
+// ---------------------------------------------------------------------------
+
+describe('TursoStorage — connection failure', () => {
+  // fetch() refuses port 1 outright (a blocked port), so the connect fails at once without touching the network.
+  const UNREACHABLE_URL = 'http://127.0.0.1:1';
+
+  it('constructing against an unreachable URL fires no unhandledRejection, and a method call still rejects with the connect error', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const adapter = new TursoStorage(UNREACHABLE_URL);
+      // No handler of the test's own is attached until the connect has failed.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(unhandled).toEqual([]);
+      await expect(adapter.countEntries({ siteId: 'site-a' })).rejects.toThrow();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('ready resolves once a reachable database is connected and migrated, and rejects when the connect fails', async () => {
+    await expect(new TursoStorage(':memory:').ready).resolves.toBeUndefined();
+    await expect(new TursoStorage(UNREACHABLE_URL).ready).rejects.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Due-alert listing (0.1.18) — one SQL text for both backends, and it must
+// read the pending-alert partial index rather than every abandoned draft.
+// ---------------------------------------------------------------------------
+
+describe('TursoStorage — due-alert listing', () => {
+  it('both adapters list due alerts with the one shared DUE_ABANDON_ALERTS_SQL (source assertion)', () => {
+    for (const file of ['./sqlite.ts', './turso.ts']) {
+      const source = fs.readFileSync(new URL(file, import.meta.url), 'utf8');
+      const start = source.indexOf('async findDueAbandonAlerts');
+      const body = source.slice(start, source.indexOf('async claimAbandonAlert', start));
+      expect(body, file).toContain('DUE_ABANDON_ALERTS_SQL');
+      expect(body, file).not.toContain('SELECT');
+    }
+  });
+
+  it('the due-alert listing reads the pending-alert partial index on libSQL too (query plan)', async () => {
+    const { createClient } = await import('@libsql/client');
+    const client = createClient({ url: ':memory:' });
+    try {
+      for (const sql of MIGRATION_SQL) await client.executeMultiple(sql);
+      const rs = await client.execute({ sql: 'EXPLAIN QUERY PLAN ' + DUE_ABANDON_ALERTS_SQL, args: [5000, 25] });
+      const plan = rs.rows.map((row) => String(row.detail)).join('\n');
+      expect(plan).toMatch(/USING INDEX idx_entries_abandon_notify\b/);
+    } finally {
+      client.close();
+    }
   });
 });
 
@@ -271,16 +356,41 @@ describe('TursoStorage — migration atomicity', () => {
     return rs.rows.map((row) => String(row.name));
   }
 
-  it('recovers a v5 database a crash left half-way through v6 (customer_ref added, payer_email and the version bump missing): boots to v6 with both columns', async () => {
+  it('recovers a v5 database a crash left half-way through v6 (customer_ref added, payer_email and the version bump missing): boots past v6 to the latest version with both columns', async () => {
     await seedAtVersion(5, ['ALTER TABLE payments ADD COLUMN customer_ref TEXT']);
 
     const adapter = new TursoStorage(url);
     await expect(adapter.countEntries({ siteId: 'site-a' })).resolves.toBe(0);
 
-    expect(await userVersion()).toBe(6);
+    expect(await userVersion()).toBe(MIGRATION_SQL.length);
     const cols = await columns('payments');
     expect(cols.filter((name) => name === 'customer_ref')).toHaveLength(1);
     expect(cols).toContain('payer_email');
+  });
+
+  it('migrates a v6 database to v7: both alert columns appear once, and a pre-existing abandoned row is never due (no alert burst on upgrade)', async () => {
+    await seedAtVersion(6, [
+      "INSERT INTO entries (id, site_id, form_id, status, fields, visitor_uuid, created_at, updated_at) VALUES ('legacy-v6', 'site-a', 'form-1', 'abandoned', '{}', 'visitor-1', 1000, 1000)",
+    ]);
+
+    const adapter = new TursoStorage(url);
+    expect(await adapter.findDueAbandonAlerts(Number.MAX_SAFE_INTEGER, 25)).toEqual([]);
+    expect(await userVersion()).toBe(MIGRATION_SQL.length);
+    const cols = await columns('entries');
+    expect(cols.filter((name) => name === 'abandon_notify_due_at')).toHaveLength(1);
+    expect(cols.filter((name) => name === 'abandon_notified_at')).toHaveLength(1);
+  });
+
+  it('recovers a v6 database a crash left half-way through v7 (one column added, version bump missing), and a second cold start is a no-op', async () => {
+    await seedAtVersion(6, ['ALTER TABLE entries ADD COLUMN abandon_notify_due_at INTEGER']);
+
+    await expect(new TursoStorage(url).countEntries({ siteId: 'site-a' })).resolves.toBe(0);
+    await expect(new TursoStorage(url).countEntries({ siteId: 'site-a' })).resolves.toBe(0);
+
+    expect(await userVersion()).toBe(MIGRATION_SQL.length);
+    const cols = await columns('entries');
+    expect(cols.filter((name) => name === 'abandon_notify_due_at')).toHaveLength(1);
+    expect(cols).toContain('abandon_notified_at');
   });
 
   it('two adapters cold-starting against the same fresh database at once both boot to the latest version without error', async () => {

@@ -145,18 +145,23 @@ export const POST: APIRoute = async ({ request }) => {
       const result = await createPaymentLink({ amountCents, currency, memo, entryId, customerEmail: entryEmail });
       link = { url: result.url, providerRef: result.providerRef };
     } else if (paypalConfigured()) {
-      // No dedicated payment-confirmation page exists in this plan's scope
-      // (that lands with 03-05's /forms-pay/success) — both return/cancel
-      // land on the site root, computed trailingSlash-aware (B1). The
-      // inbound webhook (03-07) remains the sole source of payment truth,
-      // never this browser redirect.
-      const returnUrl = `${config.siteUrl}${adminUrl('/', trailingSlash)}`;
+      // 0.1.18: the payer returns to /forms-pay/paypal-return, the page that
+      // CAPTURES the approved order (the payment-request.ts URL). Up to
+      // 0.1.17 both URLs were the site root, so an approved admin-quote order
+      // was never captured and moved no money. That route is injected under
+      // the same PayPal env gate as this branch (integration.ts
+      // `paypalActive` = `paypalConfigured()`). Cancel stays on the site
+      // root. Both are computed trailingSlash-aware (B1). The inbound
+      // webhook (03-07) remains the sole source of payment truth, never
+      // this browser redirect.
+      const returnUrl = `${config.siteUrl}${adminUrl('/forms-pay/paypal-return', trailingSlash)}`;
+      const cancelUrl = `${config.siteUrl}${adminUrl('/', trailingSlash)}`;
       const order = await createOrder({
         totalCents: amountCents,
         currency,
         entryId,
         returnUrl,
-        cancelUrl: returnUrl,
+        cancelUrl,
       });
       if (order) link = { url: order.approvalUrl, providerRef: order.providerRef };
     }

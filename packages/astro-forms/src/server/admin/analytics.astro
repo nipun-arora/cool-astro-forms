@@ -17,8 +17,7 @@ import config from 'virtual:cool-astro-forms/config';
 import type { AnalyticsFilter, DropOffRow, FunnelCounts } from '../../types.js';
 import { logError } from '../log.js';
 import { getNotifyHealth } from '../notify.js';
-import { getDb } from '../storage/db.js';
-import { SqliteStorage } from '../storage/sqlite.js';
+import { getStorageAdapter } from '../storage/index.js';
 import { ADMIN_STYLE_HASH, renderAdminPageHtml, renderAnalyticsPanelHtml } from './_shared.js';
 
 export const prerender = false;
@@ -42,7 +41,8 @@ let error = false;
 let oldestUnconvertedAt: number | undefined;
 
 try {
-  const storage = new SqliteStorage(getDb(config.dbPath));
+  // 0.1.18: same construction point as the routes — honours storage.kind ('turso') instead of hard-coding SQLite.
+  const storage = await getStorageAdapter(config);
   const fetchedFunnel = await storage.getFunnel(analyticsFilter);
   const fetchedDropOff = await storage.getTopDropOff(analyticsFilter);
   funnel = fetchedFunnel;

@@ -198,3 +198,132 @@ describe('localStorage failure fallback (Safari private mode)', () => {
     expect(fresh.readTrail().length).toBeGreaterThanOrEqual(1);
   });
 });
+
+// 0.1.18: requireConsent gate. initJourneyTracking() runs at module load, so
+// each case resets modules and sets window.__cafConfig BEFORE the dynamic
+// import (the integration injects the config head-inline ahead of the module
+// scripts — LESSONS #10). The gate reuses visitor.ts's hasConsent mechanism
+// (grantConsent / window.__cafConsent / persisted flag), same as capture.ts.
+describe('requireConsent gate (0.1.18)', () => {
+  const JOURNEY_KEY = '_caf_journey';
+
+  beforeEach(() => {
+    vi.resetModules();
+    localStorage.clear();
+    delete window.__cafConsent;
+    delete window.__cafConfig;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete window.__cafConsent;
+    delete window.__cafConfig;
+    vi.resetModules();
+  });
+
+  it('writes no journey trail to localStorage at module load before consent when requireConsent is true', async () => {
+    window.__cafConfig = { requireConsent: true };
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+
+    await import('./journey.js');
+
+    expect(setItem.mock.calls.filter(([key]) => key === JOURNEY_KEY)).toHaveLength(0);
+    expect(localStorage.getItem(JOURNEY_KEY)).toBeNull();
+  });
+
+  it('does not record on astro:page-load before consent when requireConsent is true', async () => {
+    window.__cafConfig = { requireConsent: true };
+    await import('./journey.js');
+
+    document.dispatchEvent(new Event('astro:page-load'));
+
+    expect(localStorage.getItem(JOURNEY_KEY)).toBeNull();
+  });
+
+  // Kept ahead of the consent-granting cases: astro:page-load listeners from
+  // earlier module instances outlive vi.resetModules().
+  it('clears a stored trail on astro:page-load while consent is still missing', async () => {
+    window.__cafConfig = { requireConsent: true };
+    await import('./journey.js');
+    localStorage.setItem(JOURNEY_KEY, JSON.stringify([{ url: '/old', title: 'Old', ts: Date.now() }]));
+
+    document.dispatchEvent(new Event('astro:page-load'));
+
+    expect(localStorage.getItem(JOURNEY_KEY)).toBeNull();
+  });
+
+  it('starts recording from the page where consent is granted, without backfilling earlier pages', async () => {
+    window.__cafConfig = { requireConsent: true };
+    const journey = await import('./journey.js');
+    const visitor = await import('./visitor.js');
+    expect(localStorage.getItem(JOURNEY_KEY)).toBeNull();
+
+    visitor.grantConsent();
+    journey.recordCurrentPageView();
+
+    const trail = journey.readTrail();
+    expect(trail).toHaveLength(1);
+    expect(trail[0]!.url).toBe(location.pathname);
+    expect(localStorage.getItem(JOURNEY_KEY)).not.toBeNull();
+  });
+
+  it('records on the next astro:page-load once consent is granted', async () => {
+    window.__cafConfig = { requireConsent: true };
+    const journey = await import('./journey.js');
+    const visitor = await import('./visitor.js');
+
+    visitor.grantConsent();
+    document.dispatchEvent(new Event('astro:page-load'));
+
+    expect(journey.readTrail()).toHaveLength(1);
+  });
+
+  it('records at module load when consent was already persisted (window.__cafConsent set by the host)', async () => {
+    window.__cafConfig = { requireConsent: true };
+    window.__cafConsent = true;
+
+    const journey = await import('./journey.js');
+
+    expect(journey.readTrail()).toHaveLength(1);
+  });
+
+  // Sites on <=0.1.17 stored a trail (up to 365 days) before any consent
+  // check existed. Left in place it would ship with the abandon payload the
+  // moment the visitor consents, so the gate clears it. Removing stored data
+  // needs no consent.
+  it('clears a pre-0.1.18 trail at module load when requireConsent is true and consent is missing, then restarts from one step after consent', async () => {
+    const old: JourneyStep[] = [
+      { url: '/old-a', title: 'Old A', ts: Date.now() - 86_400_000 },
+      { url: '/old-b', title: 'Old B', ts: Date.now() - 3_600_000 },
+    ];
+    localStorage.setItem(JOURNEY_KEY, JSON.stringify(old));
+    window.__cafConfig = { requireConsent: true };
+
+    const journey = await import('./journey.js');
+    const visitor = await import('./visitor.js');
+
+    expect(localStorage.getItem(JOURNEY_KEY)).toBeNull();
+
+    visitor.grantConsent();
+    journey.recordCurrentPageView();
+
+    const trail = journey.readTrail();
+    expect(trail).toHaveLength(1);
+    expect(trail[0]!.url).toBe(location.pathname);
+  });
+
+  it('records at module load with no consent signal when requireConsent is false (unchanged)', async () => {
+    window.__cafConfig = { requireConsent: false };
+
+    const journey = await import('./journey.js');
+
+    expect(journey.readTrail()).toHaveLength(1);
+    expect(localStorage.getItem(JOURNEY_KEY)).not.toBeNull();
+  });
+
+  it('records at module load when no client config is present (unchanged default)', async () => {
+    const journey = await import('./journey.js');
+
+    expect(journey.readTrail()).toHaveLength(1);
+  });
+});

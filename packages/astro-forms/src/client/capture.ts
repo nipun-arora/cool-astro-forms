@@ -15,7 +15,7 @@ import { FIELD_MAX_BYTES, MAX_PAYLOAD_BYTES } from '../limits.js';
 import { CAF_FIELD_NAME, CAPTCHA_RESPONSE_FIELD_NAMES, CLIENT_API_GLOBAL, HONEYPOT_FIELD_NAME } from '../types.js';
 import type { AbandonPayload, CafClientApi, JourneyStep } from '../types.js';
 import type { CafClientConfig } from './journey.js';
-import { clearTrail, readTrail } from './journey.js';
+import { clearTrail, readTrail, recordCurrentPageView } from './journey.js';
 import { getOrCreateVisitorUuid, grantConsent, isCaptureAllowed } from './visitor.js';
 
 /** Max one send per this many ms (ABND-01). */
@@ -675,6 +675,12 @@ const cafApi: CafClientApi = {
   },
   consentGranted(): void {
     grantConsent();
+    // 0.1.18: start the journey trail on the page where consent was given.
+    // Banners often call this on EVERY page load once consent exists; a page
+    // already at the end of the trail is skipped because pushStep's same-url
+    // dedupe would move that step's ts and skew the journey durations.
+    // location.pathname is what journey.ts stores (stripQuery(location.href)).
+    if (readTrail().at(-1)?.url !== location.pathname) recordCurrentPageView();
     init();
   },
 };

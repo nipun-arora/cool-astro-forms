@@ -172,6 +172,24 @@ describe('createPaymentLink', () => {
     expect(result.url).toBe('https://buy.stripe.com/test_g');
   });
 
+  // 0.1.18: Checkout Sessions take payment_intent_data.receipt_email, but the
+  // Payment Links API's payment_intent_data has no such field (Stripe would
+  // reject it). A link payer gets a receipt only when the dashboard's
+  // "Successful payments" email setting is on.
+  it('never sends receipt_email on a Payment Link (the Payment Links API does not accept it), even with a payer email', async () => {
+    const create = vi.fn().mockResolvedValue({ id: 'plink_r', url: 'https://buy.stripe.com/test_r' });
+    const client = fakeClient({ paymentLinksCreate: create });
+
+    await createPaymentLink(
+      { amountCents: 500, currency: 'usd', entryId: 'entry_r', customerEmail: 'payer@example.com' },
+      { client },
+    );
+
+    const [args] = create.mock.calls[0] as [{ payment_intent_data: Record<string, unknown> }];
+    expect(args.payment_intent_data).not.toHaveProperty('receipt_email');
+    expect(JSON.stringify(args)).not.toContain('receipt_email');
+  });
+
   it('defaults the line item product name to "Payment request" when memo is absent', async () => {
     const create = vi.fn().mockResolvedValue({ id: 'plink_2', url: 'https://buy.stripe.com/test_def' });
     const client = fakeClient({ paymentLinksCreate: create });
@@ -453,6 +471,116 @@ describe('createCheckoutSession', () => {
       await createCheckoutSession({ ...base, memo: undefined }, { client });
 
       expect((sessionParams(create).payment_intent_data as { description: string }).description).toBe('Payment');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 0.1.18: the pay page says "Your receipt goes here." under the email
+  // field, but up to 0.1.17 the session never named a receipt address, so
+  // Stripe emailed a receipt only when the dashboard's "Successful payments"
+  // setting was on. payment_intent_data.receipt_email makes Stripe send the
+  // receipt for a live-mode payment regardless of that setting (test mode
+  // never sends automatic receipts).
+  // -------------------------------------------------------------------------
+  describe('payer receipt (0.1.18)', () => {
+    const base = {
+      baseAmountCents: 20000,
+      feeLines: [],
+      currency: 'usd',
+      memo: 'Consulting',
+      entryId: 'entry_rcpt',
+      successUrl: 'https://site.example/forms-pay/success/',
+      cancelUrl: 'https://site.example/forms-pay/',
+    };
+
+    function receiptEmailOf(create: ReturnType<typeof vi.fn>): unknown {
+      return (create.mock.calls[0]![0] as { payment_intent_data: Record<string, unknown> }).payment_intent_data
+        .receipt_email;
+    }
+
+    it("asks Stripe to email the receipt to the payer's normalized email, on every customer path (new payer, adopted Customer, failed lookup)", async () => {
+      const paths = [
+        fakeCustomers(),
+        fakeCustomers({ seed: [{ id: 'cus_adopted', email: 'payer@example.com', created: 1, metadata: PKG }] }),
+        fakeCustomers({ failList: true }),
+      ];
+      for (const customers of paths) {
+        const create = vi.fn().mockResolvedValue({ id: 'cs_r', url: 'https://checkout.stripe.com/c/pay/cs_r' });
+        const client = fakeClient({ sessionsCreate: create, customers: customers.resource });
+
+        await createCheckoutSession({ ...base, customerEmail: '  Payer@Example.COM ' }, { client });
+
+        expect(receiptEmailOf(create)).toBe('payer@example.com');
+      }
+    });
+
+    it('sends no receipt_email when the payer gave no email (Checkout collects one; the dashboard setting then decides)', async () => {
+      for (const customerEmail of [undefined, '', '   ']) {
+        const create = vi.fn().mockResolvedValue({ id: 'cs_r', url: 'https://checkout.stripe.com/c/pay/cs_r' });
+        const client = fakeClient({ sessionsCreate: create });
+
+        await createCheckoutSession({ ...base, customerEmail }, { client });
+
+        expect(create.mock.calls[0]![0].payment_intent_data).not.toHaveProperty('receipt_email');
+      }
+    });
+
+    it('keeps entry_id and the description on the PaymentIntent next to receipt_email', async () => {
+      const create = vi.fn().mockResolvedValue({ id: 'cs_r', url: 'https://checkout.stripe.com/c/pay/cs_r' });
+      const client = fakeClient({ sessionsCreate: create });
+
+      await createCheckoutSession({ ...base, customerEmail: 'payer@example.com' }, { client });
+
+      expect(create.mock.calls[0]![0].payment_intent_data).toEqual({
+        metadata: { entry_id: 'entry_rcpt' },
+        description: 'Consulting',
+        receipt_email: 'payer@example.com',
+      });
+    });
+
+    // receipt_email overrides a merchant who switched Stripe receipts off on
+    // purpose, and lets a card tester make the account mail branded receipts
+    // to any address typed on the pay page. payments.payerReceipts:
+    // 'dashboard' hands the decision back to the dashboard setting.
+    it("payerReceipts 'dashboard' sends no receipt_email even with a payer email, on every customer path, and leaves the customer fields as they were", async () => {
+      const paths = [
+        fakeCustomers(),
+        fakeCustomers({ seed: [{ id: 'cus_adopted', email: 'payer@example.com', created: 1, metadata: PKG }] }),
+        fakeCustomers({ failList: true }),
+      ];
+      for (const customers of paths) {
+        const always = vi.fn().mockResolvedValue({ id: 'cs_r', url: 'https://checkout.stripe.com/c/pay/cs_r' });
+        const dashboard = vi.fn().mockResolvedValue({ id: 'cs_r', url: 'https://checkout.stripe.com/c/pay/cs_r' });
+
+        await createCheckoutSession(
+          { ...base, customerEmail: 'payer@example.com' },
+          { client: fakeClient({ sessionsCreate: always, customers: customers.resource }) },
+        );
+        await createCheckoutSession(
+          { ...base, customerEmail: 'payer@example.com', payerReceipts: 'dashboard' },
+          { client: fakeClient({ sessionsCreate: dashboard, customers: customers.resource }) },
+        );
+
+        const params = dashboard.mock.calls[0]![0] as Record<string, unknown> & {
+          payment_intent_data: Record<string, unknown>;
+        };
+        expect(params.payment_intent_data).toEqual({ metadata: { entry_id: 'entry_rcpt' }, description: 'Consulting' });
+        expect(JSON.stringify(params)).not.toContain('receipt_email');
+        const { payment_intent_data: _withReceipt, ...alwaysRest } = always.mock.calls[0]![0] as Record<string, unknown>;
+        const { payment_intent_data: _withoutReceipt, ...dashboardRest } = params;
+        expect({ ...dashboardRest, expires_at: 0 }).toEqual({ ...alwaysRest, expires_at: 0 });
+      }
+    });
+
+    it("payerReceipts 'always' is the same as leaving it out: receipt_email is the payer's email", async () => {
+      const create = vi.fn().mockResolvedValue({ id: 'cs_r', url: 'https://checkout.stripe.com/c/pay/cs_r' });
+
+      await createCheckoutSession(
+        { ...base, customerEmail: 'payer@example.com', payerReceipts: 'always' },
+        { client: fakeClient({ sessionsCreate: create }) },
+      );
+
+      expect(receiptEmailOf(create)).toBe('payer@example.com');
     });
   });
 

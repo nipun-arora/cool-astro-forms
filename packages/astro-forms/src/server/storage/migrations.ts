@@ -13,7 +13,7 @@
  * migrate data forward in application code instead of altering the old one.
  *
  * DIALECT-NEUTRAL EXTRACTION (Phase 5, Plan 02): `MIGRATION_SQL` is the
- * single source of the raw DDL, identical SQLite dialect across v1..v6.
+ * single source of the raw DDL, identical SQLite dialect across v1..v7.
  * `MIGRATIONS` (the better-sqlite3 function array `applyMigrations()` walks
  * for db.ts) is mechanically derived from it, and 05-03's Turso adapter
  * walks the same list inside its `#ready` gate — one list of migration SQL,
@@ -180,6 +180,22 @@ export const MIGRATION_SQL: string[] = [
   `
     ALTER TABLE payments ADD COLUMN customer_ref TEXT;
     ALTER TABLE payments ADD COLUMN payer_email TEXT;
+  `,
+
+  // v7 — Deferred abandoned-lead alert (0.1.18): the owner's "Abandoned"
+  // email and the entry.abandoned webhook wait until a due time stored on the
+  // draft, so a tab switch followed by a real submission no longer alerts.
+  // Additive-only per the policy above: two nullable columns and one index,
+  // nothing renamed or dropped, no CHECK touched. Existing rows keep NULL in
+  // both, which means "nothing pending": the old code already alerted on
+  // them, so the upgrade itself never sends anything.
+  `
+    ALTER TABLE entries ADD COLUMN abandon_notify_due_at INTEGER;
+    ALTER TABLE entries ADD COLUMN abandon_notified_at INTEGER;
+
+    -- Backs findDueAbandonAlerts. Partial: a claimed, converted or never
+    -- scheduled row has no due time, so only pending alerts are indexed.
+    CREATE INDEX idx_entries_abandon_notify ON entries (abandon_notify_due_at) WHERE abandon_notify_due_at IS NOT NULL;
   `,
 ];
 

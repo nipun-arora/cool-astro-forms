@@ -14,6 +14,15 @@
  * ONLY (a courtesy confirmation-in-progress line), never looked up or acted
  * on. Renders its own minimal shell — not `renderAdminPageHtml` (public,
  * unauthenticated page).
+ *
+ * 0.1.18 copy: up to 0.1.17 this page promised "you'll receive a receipt
+ * from Stripe by email shortly", which was true only when the Stripe
+ * dashboard's "Successful payments" email setting was on. The session now
+ * sets `receipt_email` when the payer's email is known (payments/stripe.ts),
+ * so a live payment from the pay page does get one; but a host form that
+ * posts to create-session without an email still depends on that setting,
+ * and this page cannot tell the two apart without looking the session up
+ * (which it never does). So it promises no receipt.
  */
 export const prerender = false;
 
@@ -78,7 +87,7 @@ const sessionId = Astro.url.searchParams.get('session_id');
         Thanks — we're finalizing your payment now. This can take a few moments; you don't need to do anything else
         on this page.
       </p>
-      <p>If you paid by card, you'll receive a receipt from Stripe by email shortly.</p>
+      {sessionId && <p>Keep the reference below for your records.</p>}
       {sessionId && <p class="session">Reference: {sessionId}</p>}
       <p><a href="/">&larr; Return home</a></p>
     </main>

@@ -21,6 +21,16 @@ const abandonmentConfigSchema = z
     dedupeWindowMins: z.number().int().positive().default(60),
     /** Dedupe-window updates re-notify only when true; CREATE always notifies. */
     notifyOnUpdate: z.boolean().default(false),
+    /**
+     * 0.1.18: minutes the abandoned-lead alert email and the entry.abandoned
+     * webhook wait after the first abandon save; a real submission in that
+     * time cancels both (the capture's beacon also fires on a mere tab
+     * switch). 0 sends both on the save, as before 0.1.18. Absent means 15
+     * (DEFAULT_ABANDON_ALERT_DELAY_MINS, recovery/abandon-alerts.ts), applied
+     * where it is read rather than as a zod default, so config objects typed
+     * against CoolFormsConfig need no new key.
+     */
+    alertDelayMins: z.number().int().nonnegative().optional(),
   })
   .default({ require: 'email-or-phone', dedupeWindowMins: 60, notifyOnUpdate: false });
 
@@ -175,6 +185,40 @@ const paymentsConfigSchema = z
     requestPage: paymentsRequestPageSchema,
     quoteCurrency: quoteCurrencySchema.default('usd'),
     adminQuote: adminQuoteSchema.default('builtin'),
+    /**
+     * Owner address for the "payment received" email when a payment belongs
+     * to no configured form (0.1.18). Validated exactly like a form's
+     * `notifyTo`. Payments made on `/forms-pay`, or posted to
+     * `/api/forms/pay/create-session` from a host's own pay page, are anchored
+     * on a `_payment_request` entry that no host registers as a form, so up to
+     * 0.1.17 the owner got no email for them and nothing was logged.
+     *
+     * Both payment webhooks resolve the address in this order
+     * (webhooks/payment-notify.ts): (1) the `notifyTo` of the form the
+     * payment's entry belongs to, a host-registered `_payment_request` form
+     * included; (2) this `payments.notifyTo`; (3) the `notifyTo` of the FIRST
+     * form in `forms` (config order). When none resolves the email is skipped
+     * and `payment.notify-skipped` is logged with the reason only.
+     */
+    notifyTo: z.email().optional(),
+    /**
+     * Who sends the payer's Stripe receipt (0.1.18). Checkout Sessions created
+     * by the pay page set `payment_intent_data.receipt_email` to the payer's
+     * email, and Stripe then emails a live-mode receipt whatever the
+     * dashboard's "Successful payments" customer email setting says:
+     * - `'always'` (absent means this): keep that, so the payer always gets
+     *   the receipt the pay page promises.
+     * - `'dashboard'`: never set `receipt_email`; the dashboard setting alone
+     *   decides. For a merchant who turned receipts off on purpose, or who
+     *   does not want a card tester able to make the account mail branded
+     *   receipts to addresses typed on the pay page.
+     * createCheckoutForEntry does not read this config; pass the same value
+     * as its `payerReceipts` input. Absent is applied where it is read
+     * (payment-request.ts), not as a zod default, so config objects typed
+     * against CoolFormsConfig need no new key (same as
+     * `abandonment.alertDelayMins`).
+     */
+    payerReceipts: z.enum(['always', 'dashboard']).optional(),
   })
   .default({
     payLinkFees: [],

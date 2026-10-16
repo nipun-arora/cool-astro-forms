@@ -44,22 +44,34 @@ let stripeMock: Server | undefined;
 // with an email makes several calls (customer lookup, then the Checkout
 // Session), so tests assert on the sequence, not a bare count.
 let stripeMockHits: string[] = [];
+// Form-encoded bodies of every Checkout Session create the mock received
+// (0.1.18: lets a test read the exact params the SDK put on the wire).
+let checkoutSessionBodies: string[] = [];
 
 test.beforeAll(async () => {
   stripeMockHits = [];
+  checkoutSessionBodies = [];
   stripeMock = createServer((req, res) => {
-    stripeMockHits.push(`${req.method} ${(req.url ?? '').split('?')[0]}`);
-    // A well-shaped Stripe error envelope (RESEARCH.md-documented error
-    // contract) — the SDK parses this into a thrown StripeError regardless
-    // of the specific type/code, which create-session.ts's catch-all turns
-    // into a clean 500 `{ok:false, reason:'error'}`. No live Stripe network
-    // hop happens at any point (hard rule).
-    res.writeHead(402, { 'Content-Type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        error: { message: 'e2e mock — no live Stripe account', type: 'card_error', code: 'card_declined' },
-      }),
-    );
+    const path = (req.url ?? '').split('?')[0];
+    stripeMockHits.push(`${req.method} ${path}`);
+    let body = '';
+    req.on('data', (chunk: Buffer) => {
+      body += chunk.toString('utf8');
+    });
+    req.on('end', () => {
+      if (req.method === 'POST' && path === '/v1/checkout/sessions') checkoutSessionBodies.push(body);
+      // A well-shaped Stripe error envelope (RESEARCH.md-documented error
+      // contract) — the SDK parses this into a thrown StripeError regardless
+      // of the specific type/code, which create-session.ts's catch-all turns
+      // into a clean 500 `{ok:false, reason:'error'}`. No live Stripe network
+      // hop happens at any point (hard rule).
+      res.writeHead(402, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: { message: 'e2e mock — no live Stripe account', type: 'card_error', code: 'card_declined' },
+        }),
+      );
+    });
   });
   await new Promise<void>((resolve) => stripeMock?.listen(STRIPE_MOCK_PORT, '127.0.0.1', resolve));
 });
@@ -166,6 +178,22 @@ test.describe('PAY-05 create-session — server gates live (PAY_PASS_URL, traili
     const hits = stripeMockHits.slice(hitsBefore);
     expect(hits.at(-1)).toBe('POST /v1/checkout/sessions');
     expect(hits.slice(0, -1)).toContain('GET /v1/customers');
+    // 0.1.18: the session names the payer's email as the receipt address, so
+    // Stripe emails a live-mode receipt whatever the dashboard setting (the
+    // pay page tells the payer "Your receipt goes here.").
+    const sessionParams = new URLSearchParams(checkoutSessionBodies.at(-1) ?? '');
+    expect(sessionParams.get('payment_intent_data[receipt_email]')).toBe('payer@example.com');
+  });
+});
+
+test.describe('PAY-05 /forms-pay/success copy (0.1.18)', () => {
+  test('the Stripe success page shows the reference and promises no receipt it cannot guarantee', async ({ page }) => {
+    await page.goto(`${PAY_PASS_URL}/forms-pay/success/?session_id=cs_test_e2e_reference`);
+
+    const main = page.locator('main');
+    await expect(main).toContainText('cs_test_e2e_reference');
+    await expect(main).toContainText('Keep the reference below for your records.');
+    await expect(main).not.toContainText(/receipt/i);
   });
 });
 

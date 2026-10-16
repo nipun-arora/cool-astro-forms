@@ -23,6 +23,113 @@ export type UpsertAbandonedResult = {
   entry?: Entry;
 };
 
+/**
+ * Deferred abandoned-lead alert schedule (0.1.18), passed to
+ * `upsertAbandoned` when the handler defers the owner's alert and the
+ * `entry.abandoned` webhook instead of sending them on the save.
+ */
+export interface AbandonAlertSchedule {
+  /** When the alert becomes due (epoch ms). Written when the draft is created; a later dedupe update never moves it. */
+  dueAt: number;
+  /**
+   * `notifyOnUpdate`: a dedupe update schedules one more alert at `dueAt`,
+   * but only when none is pending, so a pending alert is never duplicated or
+   * pushed back (it reads the latest draft when it goes out).
+   */
+  rearmOnUpdate?: boolean;
+}
+
+/** A draft's alert columns: `abandon_notify_due_at` (pending when set) and `abandon_notified_at` (last alert sent). */
+export interface AbandonAlertState {
+  dueAt: number | null;
+  notifiedAt: number | null;
+}
+
+/**
+ * The alert columns a dedupe update writes (0.1.18), shared by both built-in
+ * adapters. The due time stays fixed at the first abandon. A notifyOnUpdate
+ * re-arm schedules one only when none is pending; a draft with no due time
+ * has already been alerted (claimed by a sweep, or alerted on the save
+ * itself: delay 0 or a pre-0.1.18 row), so the re-arm also records that,
+ * falling back to the creation time, and the sweep then sends the email
+ * without a second entry.abandoned.
+ */
+export function alertAfterDedupeUpdate(
+  row: AbandonAlertState & { createdAt: number },
+  alert: AbandonAlertSchedule | undefined,
+): AbandonAlertState {
+  if (alert?.rearmOnUpdate && row.dueAt === null) {
+    return { dueAt: alert.dueAt, notifiedAt: row.notifiedAt ?? row.createdAt };
+  }
+  return { dueAt: row.dueAt, notifiedAt: row.notifiedAt };
+}
+
+/** The Turnstile soft-fail flag handle-abandon.ts writes into a created draft's fields (via updateEntry, never upsertAbandoned). */
+const TURNSTILE_FLAG_FIELD = '_turnstile';
+
+/**
+ * The fields `upsertAbandoned` stores (0.1.18), shared by both built-in
+ * adapters. Each beacon resends the whole form, so its fields replace the
+ * draft's, but `_turnstile` is the server's verdict on the draft, not form
+ * data: a dedupe update carries the stored row's flag over, and a beacon's
+ * own `_turnstile` is dropped on either branch. Without the carry-over a
+ * flagged bot's next beacon wiped the flag, the draft sorted with clean
+ * ones in DUE_ABANDON_ALERTS_SQL again, and a bot backlog could again hold
+ * genuine alerts back; without the drop a client could set, replace or
+ * clear the flag itself. `storedFieldsJson` is the existing row's `fields`
+ * column, already read inside the upsert's transaction, so the carry-over
+ * costs no extra query; unreadable JSON carries nothing over.
+ */
+export function abandonedDraftFields(
+  incoming: Record<string, unknown> | undefined,
+  storedFieldsJson?: string,
+): Record<string, unknown> {
+  const fields = { ...incoming };
+  delete fields[TURNSTILE_FLAG_FIELD];
+  if (storedFieldsJson === undefined) return fields;
+  let stored: Record<string, unknown> | null = null;
+  try {
+    stored = JSON.parse(storedFieldsJson) as Record<string, unknown> | null;
+  } catch {
+    // Nothing to carry over; the update replaces the unreadable fields.
+  }
+  const flag = stored?.[TURNSTILE_FLAG_FIELD];
+  if (flag !== undefined) fields[TURNSTILE_FLAG_FIELD] = flag;
+  return fields;
+}
+
+/**
+ * `findDueAbandonAlerts`' query, shared by both built-in adapters (args: now,
+ * limit). Two choices in it are load-bearing:
+ *
+ * - Turnstile-flagged drafts sort after every clean one. A bot can queue
+ *   thousands of cheap drafts that fail the check (soft-fail: saved, flagged
+ *   `fields._turnstile`, still alerted); listed oldest due first, a backlog
+ *   bigger than the sweep's batch held every genuine alert queued behind it
+ *   back for hours. The key is the flag's presence, the same test the sweep
+ *   uses to strip it, and `json_valid` guards it because `json_extract`
+ *   raises on malformed JSON: one corrupted row would fail the whole listing
+ *   instead of reaching the row mapper, which cannot read it either, so the
+ *   adapter retires it (see findDueAbandonAlerts).
+ * - `+status` keeps the planner off the status-led indexes. Without it,
+ *   SQLite and libSQL both pick idx_entries_recovery for
+ *   `status = 'abandoned'` and read every draft kept for the retention
+ *   window on every sweep, never the pending-alert partial index, which
+ *   holds only the rows with an alert scheduled.
+ */
+export const DUE_ABANDON_ALERTS_SQL = `SELECT * FROM entries
+  WHERE abandon_notify_due_at IS NOT NULL AND abandon_notify_due_at <= ? AND +status = 'abandoned'
+  ORDER BY CASE WHEN json_valid(fields) THEN json_extract(fields, '$._turnstile') IS NOT NULL ELSE 0 END ASC,
+    abandon_notify_due_at ASC, id ASC
+  LIMIT ?`;
+
+/** One alert `findDueAbandonAlerts` returns: the draft as stored now, plus whether an earlier alert for it already went out. */
+export interface DueAbandonAlert {
+  entry: Entry;
+  /** True for a `notifyOnUpdate` re-alert. `entry.abandoned` fires on creation only, so the sweep sends only the email for these. */
+  alertedBefore: boolean;
+}
+
 export interface StorageAdapter {
   /** Insert a new entry row. */
   createEntry(input: Omit<Entry, 'id' | 'createdAt' | 'updatedAt'>): Promise<Entry>;
@@ -63,16 +170,22 @@ export interface StorageAdapter {
   /**
    * Atomic dedupe: create a new 'abandoned' row, or update the existing one
    * keyed by site_id + visitor_uuid + form_id within windowMins (Plan 02).
+   * `alert` (0.1.18) schedules the deferred abandoned-lead alert in the same
+   * transaction: a created row stores `alert.dueAt`; an updated row keeps
+   * its due time, unless `alert.rearmOnUpdate` and no alert is pending.
    */
   upsertAbandoned(
     input: Omit<Entry, 'id' | 'createdAt' | 'updatedAt' | 'status'>,
     windowMins: number,
+    alert?: AbandonAlertSchedule,
   ): Promise<UpsertAbandonedResult>;
 
   /**
    * Atomic find→convert-ALL-matching→create-submitted (Plan 02/07).
    * Marks every matching abandoned row 'converted' and creates (or reuses)
-   * the submitted entry, returning how many rows were converted.
+   * the submitted entry, returning how many rows were converted. A
+   * converted row's pending abandoned-lead alert is cancelled in the same
+   * statement (0.1.18): the visitor submitted, so nobody abandoned.
    */
   convertAndCreateSubmitted(
     input: Omit<Entry, 'id' | 'createdAt' | 'updatedAt' | 'status'>,
@@ -185,6 +298,34 @@ export interface StorageAdapter {
 
   /** Whether a visitor has ever suppressed recovery email. Survives purgeVisitor (D4a). */
   isRecoverySuppressed(visitorUuid: string): Promise<boolean>;
+
+  // -------------------------------------------------------------------------
+  // Deferred abandoned-lead alert (0.1.18, migration v7). OPTIONAL so a
+  // custom adapter written against 0.1.17 still type-checks: the abandon
+  // handler defers only when BOTH methods exist (and then passes `alert` to
+  // upsertAbandoned); otherwise it alerts on the save, as before. Both
+  // built-in adapters implement them.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Abandoned rows whose alert is due (`dueAt <= now`), oldest due first,
+   * at most `limit`. Converted, claimed and never-scheduled rows are never
+   * returned. A listed row whose stored JSON cannot be read is retired
+   * instead (its due time cleared, logged once by id) and the listing re-run,
+   * so corrupted rows can neither hold the head of the queue for good nor
+   * return a short batch that ends a sweep's drain early.
+   */
+  findDueAbandonAlerts?(now: number, limit: number): Promise<DueAbandonAlert[]>;
+
+  /**
+   * Atomic exactly-once claim, made before the send: ONE conditional UPDATE
+   * that clears the due time and stamps `abandon_notified_at = now`, matching
+   * only a row that is still 'abandoned' with an alert due at or before
+   * `now`. True when this call claimed it; false with zero writes when
+   * another sweep or instance already did, a submission converted the draft,
+   * or it is not due yet.
+   */
+  claimAbandonAlert?(entryId: string, now: number): Promise<boolean>;
 
   // -------------------------------------------------------------------------
   // Rate limiting persistent surface (Phase 5, Plan 02, D2 fix #1, ADPT-01).

@@ -57,6 +57,29 @@ export const GET: APIRoute = async ({ url }) => {
   }
 
   const storage = new SqliteStorage(db);
+
+  // `?action=flag-turnstile-failed&id=<entryId>` — writes the same server-side
+  // verdict handle-abandon.ts writes after a failed Turnstile check
+  // (storage.updateEntry, never the beacon path). The server ignores a
+  // client-sent `_turnstile` (0.1.18 anti-spoof), so admin e2e specs that need
+  // a flagged draft on an instance without the ALWAYS-FAIL key use this seam.
+  // Same DEV + localhost guards as the rest of this endpoint (above).
+  if (url.searchParams.get('action') === 'flag-turnstile-failed') {
+    const id = url.searchParams.get('id');
+    const entry = id ? await storage.getEntryById(id) : undefined;
+    if (!id || !entry) {
+      return new Response(JSON.stringify({ flagged: false }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    await storage.updateEntry(id, { fields: { ...entry.fields, _turnstile: 'failed' } });
+    return new Response(JSON.stringify({ flagged: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
   const entries = await storage.listEntries({});
   // formStarts (ANLY-01 D1) — a cheap way for tests/analytics.spec.ts to
   // poll for the form_started ping landing without depending on a

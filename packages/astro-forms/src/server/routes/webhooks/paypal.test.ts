@@ -41,16 +41,19 @@ const {
   };
 });
 
-vi.mock('virtual:cool-astro-forms/config', () => ({
-  default: {
+/** The forms block every test starts from; 0.1.18 tests swap `forms`/`payments.notifyTo` on the mocked config. */
+const DEFAULT_FORMS = {
+  'contact-form': {
+    abandonment: { require: 'email-or-phone', dedupeWindowMins: 60, notifyOnUpdate: false },
+    notifyTo: 'owner@example.com',
+  },
+};
+
+const { mockConfig } = vi.hoisted(() => ({
+  mockConfig: {
     siteId: 'demo-site',
     siteUrl: 'https://example.com',
-    forms: {
-      'contact-form': {
-        abandonment: { require: 'email-or-phone', dedupeWindowMins: 60, notifyOnUpdate: false },
-        notifyTo: 'owner@example.com',
-      },
-    },
+    forms: {} as Record<string, unknown>,
     requireConsent: false,
     journeyParams: false,
     retentionDays: 90,
@@ -60,11 +63,13 @@ vi.mock('virtual:cool-astro-forms/config', () => ({
     payments: {
       payLinkFees: [],
       requestPage: { minAmountCents: 100, maxAmountCents: 1_000_000, allowedCurrencies: ['usd'] },
-    },
+    } as Record<string, unknown>,
     webhooks: [],
     trailingSlash: 'never',
   },
 }));
+
+vi.mock('virtual:cool-astro-forms/config', () => ({ default: mockConfig }));
 vi.mock('../../webhooks/handle-inbound.js', () => ({ handleInboundPayment: handleInboundPaymentMock }));
 vi.mock('../../notify.js', () => ({ sendPaymentReceivedEmail: sendPaymentReceivedEmailMock }));
 vi.mock('../../payments/paypal.js', () => ({
@@ -76,6 +81,7 @@ vi.mock('../../storage/sqlite.js', () => ({ SqliteStorage: sqliteStorageMock }))
 vi.mock('../../webhooks/deliver.js', () => ({ deliverWebhook: deliverWebhookMock }));
 vi.mock('../../log.js', () => ({ log: vi.fn(), logError: vi.fn() }));
 
+import { log } from '../../log.js';
 import { POST } from './paypal.js';
 
 // ---------------------------------------------------------------------------
@@ -174,6 +180,9 @@ function makeCtx(body: string, headers: Record<string, string> = {}): Parameters
 
 describe('POST /api/forms/webhooks/paypal', () => {
   beforeEach(() => {
+    mockConfig.forms = structuredClone(DEFAULT_FORMS);
+    delete mockConfig.payments.notifyTo;
+    vi.mocked(log).mockClear();
     process.env.PAYPAL_WEBHOOK_ID = 'wh_test_id';
     process.env.PAYPAL_CLIENT_ID = 'client_id_test';
     process.env.PAYPAL_CLIENT_SECRET = 'client_secret_test';
@@ -371,6 +380,65 @@ describe('POST /api/forms/webhooks/paypal', () => {
       },
       { template: undefined },
     );
+  });
+
+  // 0.1.18: a PayPal payment from /forms-pay is anchored on a
+  // `_payment_request` entry. Up to 0.1.17 the owner's address was read only
+  // as config.forms[formId].notifyTo, so these payments emailed nobody.
+  describe('payment received email for a pay-page payment (0.1.18)', () => {
+    async function notifyPayPage() {
+      await POST(makeCtx(JSON.stringify(PAYPAL_CAPTURE_COMPLETED_FIXTURE)));
+      const deps = handleInboundPaymentMock.mock.calls[0]![1] as { notify: (data: unknown) => Promise<unknown> };
+      return deps.notify({
+        siteId: 'demo-site',
+        formId: '_payment_request',
+        entryId: 'entry-pp',
+        provider: 'paypal',
+        amountCents: 2000,
+        currency: 'usd',
+      });
+    }
+
+    it('emails payments.notifyTo', async () => {
+      mockConfig.payments.notifyTo = 'billing@example.com';
+
+      await notifyPayPage();
+
+      expect(sendPaymentReceivedEmailMock).toHaveBeenCalledWith(
+        expect.objectContaining({ notifyTo: 'billing@example.com', provider: 'paypal', formId: '_payment_request' }),
+        { template: undefined },
+      );
+    });
+
+    it("falls back to the first configured form's notifyTo when payments.notifyTo is unset", async () => {
+      await notifyPayPage();
+
+      expect(sendPaymentReceivedEmailMock).toHaveBeenCalledWith(
+        expect.objectContaining({ notifyTo: 'owner@example.com' }),
+        { template: undefined },
+      );
+    });
+
+    it('a host-registered _payment_request form wins over payments.notifyTo', async () => {
+      mockConfig.payments.notifyTo = 'billing@example.com';
+      mockConfig.forms = { ...mockConfig.forms, _payment_request: { notifyTo: 'payments-form@example.com' } };
+
+      await notifyPayPage();
+
+      expect(sendPaymentReceivedEmailMock).toHaveBeenCalledWith(
+        expect.objectContaining({ notifyTo: 'payments-form@example.com' }),
+        { template: undefined },
+      );
+    });
+
+    it('logs payment.notify-skipped (reason only) and sends nothing when no address resolves', async () => {
+      mockConfig.forms = {};
+
+      await expect(notifyPayPage()).resolves.toBeUndefined();
+
+      expect(sendPaymentReceivedEmailMock).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith('payment.notify-skipped', { reason: 'no-notify-to' });
+    });
   });
 
   it('deliver is wired to the real deliverWebhook (reference pass-through, no wrapper)', async () => {

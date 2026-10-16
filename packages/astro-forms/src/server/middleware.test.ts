@@ -8,6 +8,7 @@ const {
   resolveAdminSecretMock,
   verifySessionMock,
   maybeRunRecoverySweepMock,
+  maybeRunAbandonAlertSweepMock,
   assertExplicitSecretsMock,
   mockConfig,
 } = vi.hoisted(() => {
@@ -45,6 +46,7 @@ const {
     resolveAdminSecretMock: vi.fn(() => 'test-secret'),
     verifySessionMock: vi.fn((_value: string, _secret: string) => false),
     maybeRunRecoverySweepMock: vi.fn(),
+    maybeRunAbandonAlertSweepMock: vi.fn(),
     // D2 fix #2 (05-01): mocked as a no-op by default so this file's
     // existing suites (predating 05-01) stay unaffected; the dedicated
     // "explicit secrets preflight" describe block below exercises wiring.
@@ -58,6 +60,7 @@ vi.mock('./storage/db.js', () => ({ getDb: getDbMock }));
 vi.mock('./storage/sqlite.js', () => ({ SqliteStorage: SqliteStorageMock }));
 vi.mock('./log.js', () => ({ logError: logErrorMock, log: vi.fn() }));
 vi.mock('./recovery/sweep.js', () => ({ maybeRunRecoverySweep: maybeRunRecoverySweepMock }));
+vi.mock('./recovery/abandon-alerts.js', () => ({ maybeRunAbandonAlertSweep: maybeRunAbandonAlertSweepMock }));
 vi.mock('./security/admin-secret.js', () => ({ resolveAdminSecret: resolveAdminSecretMock }));
 vi.mock('./security/admin-session.js', () => ({ verifySession: verifySessionMock }));
 vi.mock('./security/secrets-preflight.js', () => ({ assertExplicitSecrets: assertExplicitSecretsMock }));
@@ -455,6 +458,46 @@ describe('onRequest — recovery sweep piggyback (RCV-01)', () => {
     expect(sweepCalled).toBe(true);
     expect(next).toHaveBeenCalledTimes(1);
     expect(await res.text()).toBe('ok');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deferred abandoned-lead alert sweep (0.1.18). The alert no longer goes out
+// on the abandon save, so something has to send it later on every site,
+// including the ones with recovery off (all three live sites): the same
+// request-driven piggyback as the recovery sweep, but never gated on
+// recovery.enabled.
+// ---------------------------------------------------------------------------
+
+describe('onRequest — abandoned-lead alert sweep piggyback (0.1.18)', () => {
+  beforeEach(() => {
+    resetRuntimeConfigRegistration();
+    fakeStorage.purgeExpired.mockReset().mockResolvedValue(0);
+    maybeRunAbandonAlertSweepMock.mockReset();
+    mockConfig.trailingSlash = undefined;
+  });
+
+  it('fires maybeRunAbandonAlertSweep with the storage and config on ordinary traffic while recovery is off', async () => {
+    expect(mockConfig.recovery.enabled).toBe(false);
+    const next = vi.fn(async () => new Response('ok'));
+    await onRequest(makeContext('/contact') as never, next);
+    await flushMicrotasks();
+
+    expect(maybeRunAbandonAlertSweepMock).toHaveBeenCalledTimes(1);
+    const call = maybeRunAbandonAlertSweepMock.mock.calls[0]![0] as { config: unknown; storage: unknown };
+    expect(call.config).toBe(mockConfig);
+    expect(call.storage).toBe(fakeStorage);
+  });
+
+  it('fires on an admin-guarded (redirected) request too, and never delays next()', async () => {
+    maybeRunAbandonAlertSweepMock.mockImplementationOnce(() => new Promise(() => undefined));
+    const next = vi.fn(async () => new Response('ok'));
+    const res = (await onRequest(makeContext('/some/page') as never, next)) as Response;
+    expect(await res.text()).toBe('ok');
+
+    await onRequest(makeContext('/forms-admin/entries') as never, vi.fn(async () => new Response('secret')));
+    await flushMicrotasks();
+    expect(maybeRunAbandonAlertSweepMock).toHaveBeenCalledTimes(2);
   });
 });
 

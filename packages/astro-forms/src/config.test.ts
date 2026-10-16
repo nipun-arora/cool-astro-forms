@@ -168,6 +168,57 @@ describe('parseConfig — adminQuote.href never leaves the site through a path t
   });
 });
 
+/**
+ * 0.1.18: payments made on /forms-pay (or through POST
+ * /api/forms/pay/create-session from a host's own pay page) belong to no
+ * configured form, so up to 0.1.17 the owner got no "payment received" email
+ * for them. `payments.notifyTo` names the owner's address for those, with the
+ * same validation as a form's notifyTo.
+ */
+describe('parseConfig — payments.notifyTo (0.1.18)', () => {
+  it('accepts an owner address for payments that belong to no configured form and echoes it back', () => {
+    const parsed = parseConfig(baseConfig({ payments: { notifyTo: 'billing@example.com' } }));
+    expect(parsed.payments.notifyTo).toBe('billing@example.com');
+  });
+
+  it('is optional: an existing config parses unchanged, with no payments.notifyTo', () => {
+    expect(parseConfig(baseConfig()).payments.notifyTo).toBeUndefined();
+    expect(parseConfig(baseConfig({ payments: { payLinkFees: [] } })).payments.notifyTo).toBeUndefined();
+  });
+
+  it('rejects a value that is not an email, exactly like a form notifyTo (a typo must fail at config time, not drop every payment email)', () => {
+    expect(() => parseConfig(baseConfig({ payments: { notifyTo: 'billing' } }))).toThrow();
+    expect(() => parseConfig(baseConfig({ payments: { notifyTo: 'billing@example' } }))).toThrow();
+    expect(() => parseConfig(baseConfig({ forms: { contact: { notifyTo: 'billing@example' } } }))).toThrow();
+  });
+});
+
+/**
+ * 0.1.18: Checkout Sessions carry receipt_email, which makes Stripe mail a
+ * live-mode receipt whatever the dashboard's customer email setting.
+ * `payments.payerReceipts: 'dashboard'` hands that decision back to the
+ * dashboard; absent means 'always'.
+ */
+describe('parseConfig — payments.payerReceipts (0.1.18)', () => {
+  it("accepts 'always' and 'dashboard' and echoes them back", () => {
+    expect(parseConfig(baseConfig({ payments: { payerReceipts: 'always' } })).payments.payerReceipts).toBe('always');
+    expect(parseConfig(baseConfig({ payments: { payerReceipts: 'dashboard' } })).payments.payerReceipts).toBe(
+      'dashboard',
+    );
+  });
+
+  it("is optional, so an existing config parses unchanged; the payment code reads absent as 'always'", () => {
+    expect(parseConfig(baseConfig()).payments.payerReceipts).toBeUndefined();
+    expect(parseConfig(baseConfig({ payments: { payLinkFees: [] } })).payments.payerReceipts).toBeUndefined();
+  });
+
+  it('rejects any other value, so a typo fails at config time instead of silently sending receipts', () => {
+    expect(() => parseConfig(baseConfig({ payments: { payerReceipts: 'off' } }))).toThrow();
+    expect(() => parseConfig(baseConfig({ payments: { payerReceipts: 'never' } }))).toThrow();
+    expect(() => parseConfig(baseConfig({ payments: { payerReceipts: false } }))).toThrow();
+  });
+});
+
 describe('parseConfig — webhooks subtree (Phase 3)', () => {
   it('accepts a valid webhook target', () => {
     const parsed = parseConfig(

@@ -46,7 +46,9 @@ into a third-party dashboard does not compute itself.
 this package — not the browser landing back on `/forms-pay/success`, not the
 admin quote-flow's redirect — ever flips a payment's status. If a visitor
 closes the tab before the provider's redirect completes, the webhook still
-arrives and the payment still gets marked paid.
+arrives and the payment still gets marked paid. (From 0.1.18 the PayPal
+return page captures the approved order, but it never writes a status
+either; see "Capture on return" in §4.)
 
 ### What the Stripe webhook checks before it marks a payment paid (0.1.15)
 
@@ -81,6 +83,37 @@ never marked paid and nobody was emailed. Links created by
 payment's status in `/forms-admin`. The webhook acknowledges those events
 and leaves the row as it was, so reconcile refunds and disputes in the
 Stripe dashboard.
+
+### Who gets the "payment received" email (0.1.18)
+
+When a verified webhook marks a payment paid, the package emails the owner
+once. Up to 0.1.17 it read the address only as the `notifyTo` of the form
+the payment's entry belongs to. A payment made on `/forms-pay`, or posted to
+`/api/forms/pay/create-session` from a host's own pay page, belongs to a
+`_payment_request` entry (§7) that no host registers as a form, so the owner
+got no email and nothing was logged. Both payment webhooks (Stripe and
+PayPal) now resolve the address the same way, in this order:
+
+1. The `notifyTo` of the form the payment's entry belongs to. A host that
+   registers a `_payment_request` form keeps getting its own address there.
+2. `payments.notifyTo`, the new optional address for payments that belong to
+   no configured form. It is validated like a form's `notifyTo`.
+3. The `notifyTo` of the first form in `forms`, in config order.
+
+```js
+payments: {
+  // Owner inbox for "payment received" emails from /forms-pay and
+  // create-session payments (optional).
+  notifyTo: 'accounts@example.com',
+},
+```
+
+When none resolves, no email is sent and `payment.notify-skipped` is logged
+with the reason only (no address, amount or payer data).
+
+Upgrading: set `payments.notifyTo` if `/forms-pay` payments should reach a
+different inbox than your first form's. Without it, those emails go to the
+first form's `notifyTo`.
 
 ## 2. Admin quote-flow
 
@@ -199,6 +232,48 @@ payer was never attributed. From 0.1.17:
   payment). Payments paid before the upgrade, guest checkouts and PayPal
   rows keep both columns empty.
 
+### Payer receipts (0.1.18)
+
+Up to 0.1.17 a Stripe receipt went out only when the dashboard's
+"Successful payments" customer email setting was on, while the pay page said
+"Your receipt goes here." regardless. From 0.1.18:
+
+- **Checkout Sessions set `receipt_email`.** When the payer's email is known
+  (the `/forms-pay` page, or `createCheckoutForEntry` with `customerEmail`),
+  the session's `payment_intent_data.receipt_email` is the same normalized
+  address. Stripe documents that a live-mode payment with `receipt_email`
+  gets a receipt whatever the dashboard's customer email settings say.
+  Test mode never sends automatic receipts. With no email known nothing is
+  set: Checkout collects one, and the dashboard setting decides.
+- **`payments.payerReceipts` chooses who sends it.** `'always'` (also when
+  the key is absent) is the behaviour above. `'dashboard'` never sets
+  `receipt_email`, so the dashboard's "Successful payments" setting alone
+  decides.
+
+  ```ts
+  payments: {
+    payerReceipts: 'dashboard', // leave receipts to the Stripe dashboard setting
+  },
+  ```
+
+  The trade-off: `receipt_email` overrides the dashboard setting, and on the
+  pay page the address is whatever the visitor typed, so that address gets a
+  merchant-branded receipt. If you have turned Stripe receipts off on purpose,
+  choose `'dashboard'`. `createCheckoutForEntry` does not read the integration
+  config; pass the same value as its `payerReceipts` input (`'always'` or
+  `'dashboard'`, absent means `'always'`).
+- **Payment Links (admin quotes) are unaffected.** The Payment Links API
+  takes no `receipt_email`, so a link payer gets a receipt only when the
+  dashboard setting is on.
+- **PayPal is unaffected.** The package never sends the payer's email to
+  PayPal, and PayPal's own receipt rules apply.
+- **The copy promises less.** `/forms-pay/success` no longer says a receipt
+  is on its way, because it cannot tell a session that carried a payer
+  email from one that did not. The pay page's email hint reads "Your receipt
+  goes here." only when card is the sole option, and "Card payment receipts
+  go here." when PayPal is offered too; under `payerReceipts: 'dashboard'`
+  the hint is hidden, because no `receipt_email` is sent.
+
 ## 2a. Host-built checkouts: `createCheckoutForEntry` and `isAdminRequest` (0.1.15)
 
 A desk that quotes from its own page (an AED amount set once availability is
@@ -231,7 +306,8 @@ export const POST: APIRoute = async (context) => {
     cancelUrl: 'https://example.com/payment/cancelled/',
     idempotencyKey: body.quoteId, // a fresh UUID per quote form render
     metadata: { booking_ref: body.ref }, // optional; entry_id is set for you
-    productName: `Booking ${body.ref}`, // optional; default "Payment"
+    productName: `Booking ${body.ref}`, // optional; default "Payment"; cleaned and cut to 100 characters (0.1.18)
+    payerReceipts: 'always', // optional (0.1.18); 'dashboard' leaves the payer receipt to the Stripe dashboard setting
   });
   if (!result.ok) return Response.json({ error: result.code }, { status: 400 });
   return Response.json({ url: result.url, expiresAt: result.expiresAt });
@@ -244,7 +320,8 @@ export const POST: APIRoute = async (context) => {
    currency, an expiry 30 minutes to 24 hours ahead, absolute http(s) URLs,
    a 1-255 character idempotency key, string metadata without `entry_id`, a
    valid `customerEmail` and a `customerName` of at most 200 characters when
-   given) and returns `invalid-input` before anything else happens;
+   given, and a `payerReceipts` of `'always'` or `'dashboard'` when given)
+   and returns `invalid-input` before anything else happens;
 2. returns `stripe-not-configured` without `STRIPE_SECRET_KEY`, and
    `entry-not-found` or `storage-error` if the entry cannot be read, all
    before Stripe is called;
@@ -344,7 +421,8 @@ export interface CafTemplates {
 Every key is optional — an omitted key falls back to this package's own
 default template for that email. `paymentQuote` fires when a payment link is
 created (admin quote-flow or `/forms-pay`); `paymentReceived` fires when the
-inbound webhook confirms payment; `recovery` is the lead-recovery follow-up
+inbound webhook confirms payment, to the address resolved under "Who gets
+the 'payment received' email" in §1; `recovery` is the lead-recovery follow-up
 (honoured from 0.1.15; earlier versions ignored it). The types
 (`CafTemplates` and each template's data type), `escapeHtml` and the
 currency-aware `formatMoney(amountMinorUnits, currency)` are exported from
@@ -366,7 +444,7 @@ the amount it encodes. Query parameters:
 |---|---|
 | `?amount=200` | Base amount in **DOLLARS** — the primary contract. Decimals allowed (`amount=199.50`), up to 2 places. Whole dollars or `\d+\.\d{1,2}` — no sign, no exponent notation, no thousands separators. |
 | `?pay=20000` | Legacy alias in **CENTS** — kept for backward compatibility with pre-existing `?pay=` integrations. Non-negative integers only. |
-| `&label=` | Optional display label/memo, HTML-escaped when rendered. |
+| `&label=` | Optional display label/memo, HTML-escaped when rendered. Cleaned (0.1.18): trimmed, control characters removed, whitespace collapsed, cut to 100 characters. The page shows the cleaned label, and Stripe and the entry memo get the same text. |
 | `&fee=0` | Disables fee lines entirely for this link — only honoured when `payments.feeOverrides: 'query'`; ignored by default (logged as `payment-request.fee-override-ignored`). |
 | `&fee=<preset-key>` | Applies a named preset from `payments.feePresets` instead of the default `payments.payLinkFees` — only honoured when `payments.feeOverrides: 'query'`; ignored by default (logged as `payment-request.fee-override-ignored`). An unrecognized key silently falls back to the default fees (never an error). |
 | `&currency=usd` | Optional currency override — must be in `payments.requestPage.allowedCurrencies` or the request is rejected. |
@@ -535,6 +613,39 @@ and clicked next week will show the visitor an expired-order error, not a
 silent failure. If you need a durable, always-valid link, prefer the admin
 quote-flow's Stripe Payment Link (no per-order expiry) over a PayPal order,
 or regenerate the PayPal link before sharing it again.
+
+### Capture on return (0.1.18)
+
+The package creates PayPal orders with `intent: CAPTURE`, so the payer's
+approval alone moves no money: the order has to be captured. Up to 0.1.17
+nothing captured it, and `PAYMENT.CAPTURE.COMPLETED` never fired. PayPal
+sends the payer to `/forms-pay/paypal-return?token=<order id>&PayerID=…` once
+they approve, and that page now captures the order on the server:
+
+- **Only this install's orders.** The `token` must match a stored PayPal
+  payment that is still `link_created`. An id from the query string is never
+  sent to PayPal on trust.
+- **No double capture.** Each attempt sends a fresh `PayPal-Request-Id`, and
+  an order PayPal reports as already captured is treated as done.
+- **The button reads "Pay Now".** Orders declare `user_action: 'PAY_NOW'`.
+  PayPal's default, "Continue", is meant for a flow that returns the payer
+  without processing the payment; this one captures on return.
+- **The payer is told what happened:** received, still processing, declined
+  or not yet approved, or a plain error. After a decline or an unfinished
+  approval the page offers the stored approval link again, so the payer can
+  choose another way to pay in PayPal.
+- **The webhook still decides.** The return page never writes the payment
+  row. The verified `PAYMENT.CAPTURE.COMPLETED` webhook stays the only
+  writer of `paid`, and it is what sends the "payment received" email and
+  fires `payment.paid`. "Payment received" on the page means PayPal accepted
+  the capture.
+- **Admin-quote PayPal orders return here too.** They previously returned to
+  the site root and were never captured.
+
+Upgrading: orders approved under 0.1.17 or earlier were never captured.
+Check them in the PayPal dashboard.
+
+Not yet drilled against the PayPal sandbox (§6).
 
 ## 5. HOOK-01 — outbound webhooks
 

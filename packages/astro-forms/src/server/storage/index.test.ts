@@ -8,14 +8,19 @@ import type { CoolFormsConfig } from '../../config.js';
 import { getDb, resetDbCache } from './db.js';
 import { SqliteStorage } from './sqlite.js';
 
-const { FakeTursoStorage, tursoConstructorCalls } = vi.hoisted(() => {
+const { FakeTursoStorage, tursoConstructorCalls, tursoConnect } = vi.hoisted(() => {
   const tursoConstructorCalls: Array<{ dbUrl?: string; authToken?: string }> = [];
+  /** Whether the next fake connects: 'fail' makes its `ready` reject, like a Turso outage at cold start. */
+  const tursoConnect = { next: 'ok' as 'ok' | 'fail' };
   class FakeTursoStorage {
+    readonly ready: Promise<void>;
     constructor(dbUrl?: string, authToken?: string) {
       tursoConstructorCalls.push({ dbUrl, authToken });
+      this.ready = tursoConnect.next === 'fail' ? Promise.reject(new Error('turso unreachable')) : Promise.resolve();
+      tursoConnect.next = 'ok';
     }
   }
-  return { FakeTursoStorage, tursoConstructorCalls };
+  return { FakeTursoStorage, tursoConstructorCalls, tursoConnect };
 });
 
 // Mocked exactly like the package's OWN self-referencing bare specifier the
@@ -23,7 +28,7 @@ const { FakeTursoStorage, tursoConstructorCalls } = vi.hoisted(() => {
 // branch is genuinely reached without requiring a built `dist/` locally.
 vi.mock('cool-astro-forms/server/storage/turso.js', () => ({ TursoStorage: FakeTursoStorage }));
 
-import { getStorageAdapter } from './index.js';
+import { getStorageAdapter, resetStorageAdapterCache } from './index.js';
 
 function baseConfig(overrides: Partial<CoolFormsConfig> = {}): CoolFormsConfig {
   return {
@@ -40,7 +45,9 @@ const ORIGINAL_CAF_TURSO_AUTH_TOKEN = process.env.CAF_TURSO_AUTH_TOKEN;
 
 afterEach(() => {
   resetDbCache();
+  resetStorageAdapterCache();
   tursoConstructorCalls.length = 0;
+  tursoConnect.next = 'ok';
   if (ORIGINAL_CAF_STORAGE_KIND === undefined) delete process.env.CAF_STORAGE_KIND;
   else process.env.CAF_STORAGE_KIND = ORIGINAL_CAF_STORAGE_KIND;
   if (ORIGINAL_CAF_DB_PATH === undefined) delete process.env.CAF_DB_PATH;
@@ -131,5 +138,57 @@ describe('getStorageAdapter — env-fallback path (no config arg, mirrors record
       visitorUuid: 'visitor-1',
     });
     expect(entry.id).toBeTruthy();
+  });
+});
+
+// 0.1.18: the admin pages now acquire storage per request too, and a fresh
+// TursoStorage per call meant a new libSQL client and a migration check
+// (PRAGMA user_version round trip) on every request and every sweep tick.
+describe('getStorageAdapter — one TursoStorage per database per process', () => {
+  const turso = () => baseConfig({ storage: { kind: 'turso' } });
+
+  it('returns the same instance for the same URL and token, including two calls racing on a cold start', async () => {
+    process.env.CAF_TURSO_DATABASE_URL = 'libsql://example.turso.io';
+    process.env.CAF_TURSO_AUTH_TOKEN = 'test-token';
+
+    const [a, b] = await Promise.all([getStorageAdapter(turso()), getStorageAdapter(turso())]);
+    const c = await getStorageAdapter();
+    process.env.CAF_STORAGE_KIND = 'turso';
+    const d = await getStorageAdapter();
+
+    expect(a).toBeInstanceOf(FakeTursoStorage);
+    expect(b).toBe(a);
+    expect(d).toBe(a);
+    expect(c).toBeInstanceOf(SqliteStorage);
+    expect(tursoConstructorCalls).toHaveLength(1);
+  });
+
+  it('a different URL or token gets its own instance', async () => {
+    process.env.CAF_TURSO_DATABASE_URL = 'libsql://one.turso.io';
+    process.env.CAF_TURSO_AUTH_TOKEN = 'token-a';
+    const first = await getStorageAdapter(turso());
+    process.env.CAF_TURSO_AUTH_TOKEN = 'token-b';
+    const rotated = await getStorageAdapter(turso());
+    process.env.CAF_TURSO_DATABASE_URL = 'libsql://two.turso.io';
+    const other = await getStorageAdapter(turso());
+
+    expect(rotated).not.toBe(first);
+    expect(other).not.toBe(rotated);
+    expect(tursoConstructorCalls).toHaveLength(3);
+  });
+
+  it('an instance whose connect failed is dropped, so the next call reconnects instead of reusing the dead client', async () => {
+    process.env.CAF_TURSO_DATABASE_URL = 'libsql://example.turso.io';
+    process.env.CAF_TURSO_AUTH_TOKEN = 'test-token';
+    tursoConnect.next = 'fail';
+
+    const failed = await getStorageAdapter(turso());
+    await expect((failed as unknown as InstanceType<typeof FakeTursoStorage>).ready).rejects.toThrow('turso unreachable');
+    const retried = await getStorageAdapter(turso());
+    const reused = await getStorageAdapter(turso());
+
+    expect(retried).not.toBe(failed);
+    expect(reused).toBe(retried);
+    expect(tursoConstructorCalls).toHaveLength(2);
   });
 });

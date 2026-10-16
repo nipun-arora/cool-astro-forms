@@ -1,25 +1,73 @@
 ---
 /**
  * GET /forms-pay/paypal-return (PAY-05) — the PayPal Order's approval
- * `return_url` landing page, same holding-state posture as success.astro.
+ * `return_url` landing page. PayPal sends the buyer here with
+ * `?token=<order id>&PayerID=…` once they approve the order.
  *
- * T-03-22 (spoofing / fake fulfillment): landing here proves the visitor
- * approved the order in PayPal's UI, NOT that the capture succeeded — this
- * page MUST NEVER flip `payments.status` to `'paid'` or write ANYTHING to
- * storage. The inbound PayPal webhook (`PAYMENT.CAPTURE.COMPLETED`, 03-07)
- * remains the sole source of truth. `token`/`PayerID` (PayPal's own
- * return-URL query params) are read for DISPLAY ONLY, never looked up or
- * acted on. Renders its own minimal shell — not `renderAdminPageHtml`
- * (public, unauthenticated page).
+ * 0.1.18: this page CAPTURES the approved order on the server
+ * (`handlePaypalReturn`, payments/paypal-return.ts). Up to 0.1.17 it only
+ * displayed the token, and since nothing ever called PayPal's capture
+ * endpoint, an approved `intent: CAPTURE` order moved no money and
+ * PAYMENT.CAPTURE.COMPLETED never fired. The handler captures only a token
+ * that matches a stored PayPal payments row in `link_created` (never an id on
+ * trust from the query string), with a fresh PayPal-Request-Id per attempt so
+ * a retry after a decline is not a replay of it. A reload or double hit cannot
+ * capture twice: PayPal allows one capture per order and answers a second
+ * with ORDER_ALREADY_CAPTURED, which this page reads as received.
  *
- * A3 (03-RESEARCH.md): PayPal approval links expire a few hours after
- * order creation — documented in on-page copy so a visitor who bookmarks
- * or revisits a stale link understands why it may no longer work.
+ * T-03-22 (spoofing / fake fulfillment) still holds: this page MUST NEVER
+ * flip `payments.status` to `'paid'` or write ANYTHING to storage. Its only
+ * side effect is the capture request to PayPal. The inbound PayPal webhook
+ * (`PAYMENT.CAPTURE.COMPLETED`, routes/webhooks/paypal.ts) remains the sole
+ * writer of `paid`, so "Payment received" here means PayPal accepted the
+ * capture, and the owner's records follow from the verified webhook.
+ *
+ * The copy says only what the capture answer supports: received, still
+ * processing, declined or not yet approved (with the stored approval URL so
+ * the payer can go back to PayPal, PayPal's documented handling), or a plain
+ * error. `Cache-Control: no-store`: the answer is per request and a CDN must
+ * never serve one payer's result to another hit. Renders its own minimal
+ * shell — not `renderAdminPageHtml` (public, unauthenticated page).
+ *
+ * A3 (03-RESEARCH.md): PayPal approval links expire a few hours after order
+ * creation, so the retry copy tells the payer to ask for a new link if the
+ * old one no longer works.
  */
+import config from 'virtual:cool-astro-forms/config';
+import { log, logError } from '../log.js';
+import { captureOrder } from '../payments/paypal.js';
+import { handlePaypalReturn, type PaypalReturnResult } from '../payments/paypal-return.js';
+import { getStorageAdapter } from '../storage/index.js';
+
 export const prerender = false;
 
-// Display-only — never used to query storage or flip any state (see docstring).
-const token = Astro.url.searchParams.get('token');
+Astro.response.headers.set('Cache-Control', 'no-store');
+
+let result: PaypalReturnResult;
+try {
+  const storage = await getStorageAdapter(config);
+  result = await handlePaypalReturn(
+    { token: Astro.url.searchParams.get('token') },
+    { storage, capture: (orderId) => captureOrder(orderId), log },
+  );
+} catch (err) {
+  // Storage acquisition (migration/open/backend selection) failed; the
+  // handler itself never throws.
+  logError('paypal-return.failed', err);
+  result = { outcome: 'error' };
+}
+
+const { outcome, retryUrl, reference } = result;
+
+const TITLES: Record<PaypalReturnResult['outcome'], string> = {
+  captured: 'Payment received',
+  pending: 'Payment processing',
+  declined: 'PayPal declined the payment',
+  'needs-approval': 'Your PayPal payment is not finished',
+  'unknown-order': 'We could not find this payment',
+  error: 'We could not confirm your payment',
+};
+const title = TITLES[outcome];
 ---
 
 <!doctype html>
@@ -28,7 +76,7 @@ const token = Astro.url.searchParams.get('token');
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
-    <title>Confirming your payment…</title>
+    <title>{title}</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -78,17 +126,74 @@ const token = Astro.url.searchParams.get('token');
   </head>
   <body>
     <main>
-      <h1>Confirming your payment…</h1>
-      <p>
-        Thanks — we're finalizing your PayPal payment now. This can take a few moments; you don't need to do
-        anything else on this page.
-      </p>
-      <p>You'll receive a receipt from PayPal by email once the capture completes.</p>
-      <p class="caveat">
-        Note: PayPal approval links expire a few hours after they're created. If you're seeing this page from an
-        old link and something looks wrong, ask for a fresh payment link rather than retrying this one.
-      </p>
-      {token && <p class="session">Reference: {token}</p>}
+      <h1>{title}</h1>
+      {
+        outcome === 'captured' && (
+          <p>
+            Thank you. PayPal has accepted your payment and we are confirming it now. You don't need to do anything
+            else on this page.
+          </p>
+        )
+      }
+      {
+        outcome === 'pending' && (
+          <p>PayPal is still processing your payment. You don't need to pay again.</p>
+        )
+      }
+      {
+        outcome === 'declined' && (
+          <>
+            <p>PayPal could not take the payment with the method you chose.</p>
+            {retryUrl ? (
+              <p>
+                <a href={retryUrl}>Choose another way to pay in PayPal</a>. If that does not work, ask us for a new
+                payment link.
+              </p>
+            ) : (
+              <p>Please ask us for a new payment link.</p>
+            )}
+          </>
+        )
+      }
+      {
+        outcome === 'needs-approval' && (
+          <>
+            <p>PayPal needs you to finish approving this payment.</p>
+            {retryUrl ? (
+              <p>
+                <a href={retryUrl}>Return to PayPal</a> to complete it.
+              </p>
+            ) : (
+              <p>Please ask us for a new payment link.</p>
+            )}
+          </>
+        )
+      }
+      {
+        (outcome === 'declined' || outcome === 'needs-approval') && retryUrl && (
+          <p class="caveat">
+            PayPal approval links expire a few hours after they are created. If the link no longer works, ask us for
+            a new one.
+          </p>
+        )
+      }
+      {
+        outcome === 'unknown-order' && (
+          <p>
+            We could not match this page to a payment. If you approved a payment in PayPal, please contact us before
+            trying to pay again.
+          </p>
+        )
+      }
+      {
+        outcome === 'error' && (
+          <p>
+            We could not confirm your PayPal payment right now. Reload this page in a minute to try again. You will
+            not be charged twice.
+          </p>
+        )
+      }
+      {reference && <p class="session">Reference: {reference}</p>}
       <p><a href="/">&larr; Return home</a></p>
     </main>
   </body>

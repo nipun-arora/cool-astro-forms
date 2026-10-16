@@ -137,6 +137,39 @@ submissions, abandons, admin actions, rate-limit buckets, all land in the
 same backend. There is no split-brain mode where some writes go to SQLite
 and others to Turso.
 
+Reads follow the same switch (0.1.18): the Entries, Abandoned, Payments,
+Analytics and entry-detail admin pages read the configured backend. Up to
+0.1.17 they opened the local SQLite file whatever `storage.kind` said, so a
+Turso deployment showed an empty admin.
+
+The Turso client is shared (0.1.18): `getStorageAdapter` keeps one per
+`CAF_TURSO_DATABASE_URL` and `CAF_TURSO_AUTH_TOKEN` pair for the life of the
+process, rather than building a client and running a migration check on every
+call. If the connect fails (Turso unreachable at cold start), that client is
+dropped and the next request reconnects. The failed connect no longer
+surfaces as an unhandled rejection, which ends a Node process under its
+default policy; every storage call still rejects with the connect error.
+
+### The abandoned-lead alert on serverless (0.1.18)
+
+The owner's abandoned-lead email and the `entry.abandoned` webhook are
+deferred by `forms.<id>.abandonment.alertDelayMins` (default 15; `0` sends
+them on the save) and sent by a request-driven sweep, not a timer. That suits
+serverless: nothing has to survive between invocations except the due time,
+which lives on the draft row in your Turso database (migration v7, applied on
+boot like the others). The sweep is fire-and-forget inside whichever
+invocation trips its once-a-minute gate, and it runs with `recovery.enabled`
+off too. Two things to know:
+
+- The gate is per process, so on a host that spins up many short-lived
+  instances several of them may check in the same minute. That is safe: each
+  due draft is claimed with one conditional update before it is sent, so it is
+  sent once.
+- A claimed alert is never retried (a crash between the claim and the send
+  drops that one alert rather than risk a duplicate), so an invocation torn
+  down mid-send loses that one alert. On a quiet site the alert goes out
+  with the first request after the delay: at or after it, never before.
+
 ### Postgres pooling guidance (for the future v2 path)
 
 `pg.Pool` connection pooling guidance for a future Postgres backend: cap

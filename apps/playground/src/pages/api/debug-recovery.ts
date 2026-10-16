@@ -17,6 +17,11 @@
  *    forwarding to the real `sendRecoveryEmail` (jsonTransport in dev — no
  *    live SMTP), so the actual production send path is exercised, not
  *    stubbed out.
+ *  - `?action=abandon-alert-sweep` (0.1.18) runs the deferred abandoned-
+ *    lead alert sweep (`runAbandonAlertSweep`) with `now` advanced past the
+ *    alert delay, through the real email (jsonTransport in dev) and webhook
+ *    paths, so a spec can prove the alert waits for the delay and that a
+ *    submission inside it cancels the alert, without a real 15-minute wait.
  *  - `?action=unsubscribe-url&visitorUuid=...` mints a validly-signed
  *    unsubscribe link for a visitor WITHOUT running a sweep first (so
  *    `recovery_sent_at` stays NULL going in) — this isolates "the visitor
@@ -26,7 +31,9 @@
 import type { APIRoute } from 'astro';
 import { getDb, SqliteStorage } from 'cool-astro-forms/server';
 import {
+  DEFAULT_ABANDON_ALERT_DELAY_MINS,
   resolveRecoverySecret,
+  runAbandonAlertSweep,
   runRecoverySweep,
   sendRecoveryEmail,
   signUnsubscribeToken,
@@ -87,6 +94,17 @@ export const GET: APIRoute = async ({ url }) => {
     });
 
     return json(200, { sent });
+  }
+
+  if (action === 'abandon-alert-sweep') {
+    // Past every form's delay: the playground forms keep the default unless
+    // they set alertDelayMins, so take the longest configured one.
+    const delayMins = Math.max(
+      DEFAULT_ABANDON_ALERT_DELAY_MINS,
+      ...Object.values(cfg.forms).map((form) => form.abandonment.alertDelayMins ?? 0),
+    );
+    await runAbandonAlertSweep({ storage: new SqliteStorage(getDb()), config: cfg, now: () => Date.now() + delayMins * 60_000 + 5_000 });
+    return json(200, { ok: true });
   }
 
   return json(400, { error: 'unknown action' });

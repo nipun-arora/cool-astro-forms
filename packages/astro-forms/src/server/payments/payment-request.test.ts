@@ -678,6 +678,89 @@ describe('handlePaymentRequest — fee selector opt-in (payments.feeOverrides)',
 });
 
 // ---------------------------------------------------------------------------
+// Payer receipts (payments.payerReceipts, 0.1.18). The Checkout Session's
+// receipt_email makes Stripe mail a live-mode receipt whatever the
+// dashboard's customer email setting, so a merchant who turned receipts off
+// on purpose would get them sent anyway, and a card tester could make the
+// account mail branded receipts to typed addresses. 'dashboard' leaves that
+// decision to the dashboard; absent means 'always' (the 0.1.18 fix).
+// ---------------------------------------------------------------------------
+
+describe('handlePaymentRequest — payer receipts (payments.payerReceipts)', () => {
+  function sessionInput(deps: HandlePaymentRequestDeps): Record<string, unknown> {
+    return (deps.createCheckoutSession as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+  }
+
+  it("a config without payerReceipts asks for the payer's receipt ('always')", async () => {
+    const deps = makeDeps();
+    await handlePaymentRequest(makeInput(), deps);
+
+    expect(sessionInput(deps).payerReceipts).toBe('always');
+  });
+
+  it("payerReceipts: 'dashboard' reaches createCheckoutSession, so no receipt_email is set", async () => {
+    const base = makeConfig();
+    const deps = makeDeps({ config: { ...base, payments: { ...base.payments, payerReceipts: 'dashboard' } } });
+    await handlePaymentRequest(makeInput(), deps);
+
+    expect(sessionInput(deps).payerReceipts).toBe('dashboard');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The free-text label (0.1.18). `label` is whatever the pay link or the
+// visitor posts; it becomes the Checkout line item name and the PaymentIntent
+// description the payer and the Stripe dashboard read, and the entry's memo.
+// Control characters are removed, whitespace collapsed, the result capped at
+// 100 characters; nothing left means no memo (Stripe's line item reads
+// "Payment").
+// ---------------------------------------------------------------------------
+
+describe('handlePaymentRequest — label cleaning', () => {
+  async function memoFor(label: string): Promise<{ sent: unknown; stored: unknown }> {
+    const deps = makeDeps();
+    const result = await handlePaymentRequest(
+      makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com&label=' + encodeURIComponent(label) }),
+      deps,
+    );
+    expect(result.status).toBe(302);
+    return {
+      sent: (deps.createCheckoutSession as ReturnType<typeof vi.fn>).mock.calls[0]![0].memo,
+      stored: (deps.storage.createEntry as ReturnType<typeof vi.fn>).mock.calls[0]![0].fields.memo,
+    };
+  }
+
+  it('caps a long label at 100 characters, on the Stripe line item and on the entry', async () => {
+    const { sent, stored } = await memoFor('x'.repeat(5000));
+
+    expect(sent).toBe('x'.repeat(100));
+    expect(stored).toBe('x'.repeat(100));
+  });
+
+  it('counts characters, not UTF-16 units: the cap never splits an emoji into a lone surrogate', async () => {
+    const { sent } = await memoFor('a'.repeat(99) + '\u{1F981}\u{1F981}');
+
+    expect(sent).toBe('a'.repeat(99) + '\u{1F981}');
+  });
+
+  it('removes control characters and collapses whitespace', async () => {
+    const { sent, stored } = await memoFor('  Deposit\u0000 for\r\n\r\nthe\u001b[2J   tour\t');
+
+    expect(sent).toBe('Deposit for the[2J tour');
+    expect(stored).toBe('Deposit for the[2J tour');
+  });
+
+  it('a label that is empty after cleaning sends no memo (Stripe falls back to "Payment") and stores none', async () => {
+    for (const label of ['', '   ', '\u0000\u0007\r\n\t']) {
+      const { sent, stored } = await memoFor(label);
+
+      expect(sent).toBeUndefined();
+      expect(stored).toBeUndefined();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Happy path (PayPal) — provider=paypal branch.
 // ---------------------------------------------------------------------------
 

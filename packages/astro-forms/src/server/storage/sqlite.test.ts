@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { runStorageContract } from './adapter.contract.js';
+import { DUE_ABANDON_ALERTS_SQL } from './adapter.js';
 import { SqliteStorage } from './sqlite.js';
 import { getDb, resetDbCache } from './db.js';
 import { MIGRATION_SQL, MIGRATIONS, migrationStatements } from './migrations.js';
@@ -117,6 +118,32 @@ describe('SqliteStorage — SQLite-specific behavior', () => {
     const logged = JSON.parse(firstCallArg);
     expect(logged.event).toBe('storage.corrupt-row');
     errorSpy.mockRestore();
+  });
+
+  // findDueAbandonAlerts reads the Turnstile flag out of `fields` to put
+  // flagged drafts last. json_extract() raises on malformed JSON, which
+  // would fail the whole listing and stall every alert behind one bad row.
+  it('one due draft with corrupted fields JSON does not fail the due-alert listing (the bot-flag sort key tolerates it)', async () => {
+    const draft = (visitorUuid: string) => ({ siteId: 'site-a', formId: 'form-1', fields: {}, visitorUuid });
+    const bad = (await adapter.upsertAbandoned(draft('v-bad'), 60, { dueAt: 1000 })).entry!.id;
+    const good = (await adapter.upsertAbandoned(draft('v-good'), 60, { dueAt: 2000 })).entry!.id;
+    db.prepare('UPDATE entries SET fields = ? WHERE id = ?').run('{not valid json', bad);
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const due = await adapter.findDueAbandonAlerts(5000, 25);
+    errorSpy.mockRestore();
+    expect(due.map((alert) => alert.entry.id)).toEqual([good]);
+  });
+
+  // The sweep runs this every minute. Without the pending-alert partial
+  // index the planner picks idx_entries_recovery on `status = 'abandoned'`
+  // and reads every abandoned draft kept for the retention window, not
+  // just the few with an alert due.
+  it('the due-alert listing reads the pending-alert partial index, not every abandoned draft (query plan)', () => {
+    const plan = (db.prepare('EXPLAIN QUERY PLAN ' + DUE_ABANDON_ALERTS_SQL).all(5000, 25) as { detail: string }[])
+      .map((row) => row.detail)
+      .join('\n');
+    expect(plan).toMatch(/USING INDEX idx_entries_abandon_notify\b/);
   });
 
   it('cascades payments and files deletion in the same transaction as purgeVisitor', async () => {
@@ -838,6 +865,101 @@ describe('migrations — v6 (payments.customer_ref + payments.payer_email)', () 
 });
 
 // ---------------------------------------------------------------------------
+// migrations.ts — v7 (deferred abandoned-lead alert, additive-only, 0.1.18).
+// The upgrade must not alert anyone: every abandoned row already in a live
+// forms.db had its alert sent immediately by the old code, so the new due
+// column starts NULL ("nothing pending") on all of them.
+// ---------------------------------------------------------------------------
+
+describe('migrations — v7 (entries.abandon_notify_due_at + entries.abandon_notified_at)', () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    resetDbCache();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'caf-migrate-v7-'));
+    dbPath = path.join(tmpDir, 'forms.db');
+  });
+
+  afterEach(() => {
+    resetDbCache();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** A deployed v6 forms.db with one abandoned row the old code already alerted on. */
+  function seedV6(leftovers: string[] = []): void {
+    const raw = new Database(dbPath);
+    raw.pragma('journal_mode = WAL');
+    for (let i = 0; i < 6; i++) MIGRATIONS[i]!(raw);
+    raw.pragma('user_version = 6');
+    raw
+      .prepare(
+        `INSERT INTO entries (id, site_id, form_id, status, fields, visitor_uuid, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run('legacy-abandoned-v6', 'site-a', 'form-1', 'abandoned', '{"email":"old@example.com"}', 'visitor-1', 1000, 1000);
+    for (const sql of leftovers) raw.exec(sql);
+    raw.close();
+  }
+
+  function entryColumns(db: Database.Database): { name: string; notnull: number }[] {
+    return db.prepare('PRAGMA table_info(entries)').all() as { name: string; notnull: number }[];
+  }
+
+  it('is the seventh migration: two nullable entries columns plus an index, nothing dropped, renamed or re-constrained', () => {
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(7);
+    expect(MIGRATION_SQL[6]).toContain('ALTER TABLE entries ADD COLUMN abandon_notify_due_at INTEGER');
+    expect(MIGRATION_SQL[6]).toContain('ALTER TABLE entries ADD COLUMN abandon_notified_at INTEGER');
+    expect(MIGRATION_SQL[6]).toContain('CREATE INDEX idx_entries_abandon_notify');
+    expect(MIGRATION_SQL[6]).not.toMatch(/DROP|RENAME|CHECK/i);
+  });
+
+  it('migrates a v6 db to v7 with both columns nullable and the pending-alert index, and a pre-existing abandoned row is never due (no alert burst on upgrade)', async () => {
+    seedV6();
+
+    const migrated = getDb(dbPath);
+    expect(migrated.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
+    for (const name of ['abandon_notify_due_at', 'abandon_notified_at']) {
+      const col = entryColumns(migrated).find((c) => c.name === name);
+      expect(col, name).toBeDefined();
+      expect(col?.notnull, name).toBe(0);
+    }
+    const index = migrated
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_entries_abandon_notify'")
+      .get() as { sql: string } | undefined;
+    expect(index?.sql).toMatch(/abandon_notify_due_at/);
+
+    const row = migrated.prepare('SELECT * FROM entries WHERE id = ?').get('legacy-abandoned-v6') as Record<string, unknown>;
+    expect(row.abandon_notify_due_at).toBeNull();
+    expect(row.abandon_notified_at).toBeNull();
+
+    const storage = new SqliteStorage(migrated);
+    expect(await storage.findDueAbandonAlerts(Number.MAX_SAFE_INTEGER, 25)).toEqual([]);
+    expect((await storage.getEntryById('legacy-abandoned-v6'))?.fields).toEqual({ email: 'old@example.com' });
+  });
+
+  it('recovers a v6 db left half-way through v7 (one column added, the rest and the version bump missing): boots to v7 with each column once', () => {
+    seedV6(['ALTER TABLE entries ADD COLUMN abandon_notify_due_at INTEGER']);
+
+    const migrated = getDb(dbPath);
+    expect(migrated.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
+    const names = entryColumns(migrated).map((c) => c.name);
+    expect(names.filter((name) => name === 'abandon_notify_due_at')).toHaveLength(1);
+    expect(names.filter((name) => name === 'abandon_notified_at')).toHaveLength(1);
+  });
+
+  it('re-opening an already-migrated v7 db is a no-op (the runner never re-applies v7)', () => {
+    seedV6();
+    getDb(dbPath);
+    resetDbCache();
+
+    const reopened = getDb(dbPath);
+    expect(reopened.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
+    expect(entryColumns(reopened).filter((c) => c.name === 'abandon_notified_at')).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Migration runner (0.1.17 audit, LOW) — each block and its user_version
 // bump commit as one BEGIN IMMEDIATE transaction that re-reads the version
 // under the write lock, and an ADD COLUMN whose column already exists counts
@@ -875,19 +997,19 @@ describe('migrations — runner atomicity + re-run tolerance', () => {
     return (db.prepare('PRAGMA table_info(payments)').all() as { name: string }[]).map((c) => c.name);
   }
 
-  it('recovers a v5 db left half-way through v6 (customer_ref present, payer_email and the version bump missing): getDb boots to v6 with both columns', () => {
+  it('recovers a v5 db left half-way through v6 (customer_ref present, payer_email and the version bump missing): getDb boots past v6 to the latest version with both columns', () => {
     const raw = seedV5();
     raw.exec('ALTER TABLE payments ADD COLUMN customer_ref TEXT');
     raw.close();
 
     const migrated = getDb(dbPath);
-    expect(migrated.pragma('user_version', { simple: true })).toBe(6);
+    expect(migrated.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
     const cols = paymentColumns(migrated);
     expect(cols.filter((name) => name === 'customer_ref')).toHaveLength(1);
     expect(cols).toContain('payer_email');
   });
 
-  it('a second process that read v5 while another runner held v6 uncommitted boots to v6 without re-running the block', async () => {
+  it('a second process that read v5 while another runner held v6 uncommitted boots past v6 to the latest version without re-running the block', async () => {
     // Runner A: mid-way through v6 inside its write transaction, not yet committed.
     const runnerA = seedV5();
     runnerA.exec('BEGIN IMMEDIATE');
@@ -933,7 +1055,7 @@ describe('migrations — runner atomicity + re-run tolerance', () => {
     runnerA.exec('COMMIT');
 
     expect(await exited, stderr).toBe(0);
-    expect(stdout).toContain('RESULT 6');
+    expect(stdout).toContain(`RESULT ${MIGRATIONS.length}`);
     const cols = paymentColumns(runnerA);
     expect(cols.filter((name) => name === 'customer_ref')).toHaveLength(1);
     expect(cols.filter((name) => name === 'payer_email')).toHaveLength(1);

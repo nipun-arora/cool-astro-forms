@@ -39,6 +39,12 @@
  * with the event id only. One Stripe client per delivery verifies the
  * signature and makes that update.
  *
+ * 0.1.18: the owner's "payment received" address comes from the resolver
+ * shared with the PayPal route (webhooks/payment-notify.ts): the entry's own
+ * form, then `payments.notifyTo`, then the first configured form. Up to
+ * 0.1.17 only `config.forms[formId].notifyTo` was read, so a `/forms-pay` or
+ * create-session payment (anchored on `_payment_request`) emailed nobody.
+ *
  * Clean-room: written fresh against 03-CONTEXT.md/03-RESEARCH.md, not
  * derived from any commercial form-plugin source.
  */
@@ -54,8 +60,8 @@ import { getStripeClient, verifyStripeWebhook } from '../../payments/stripe.js';
 import { contentLengthWithinCap, readBodyCapped } from '../../security/size-cap.js';
 import { getStorageAdapter } from '../../storage/index.js';
 import { deliverWebhook } from '../../webhooks/deliver.js';
-import { handleInboundPayment, type PaymentReceivedNotifyData } from '../../webhooks/handle-inbound.js';
-import { adminUrl } from '../../admin/_shared.js';
+import { handleInboundPayment } from '../../webhooks/handle-inbound.js';
+import { createPaymentReceivedNotifier } from '../../webhooks/payment-notify.js';
 
 export const prerender = false;
 
@@ -169,8 +175,6 @@ export const POST: APIRoute = async ({ request }) => {
   try {
     const session = event.data.object as Stripe.Checkout.Session;
     const storage = await getStorageAdapter(config);
-    const trailingSlash = (config as ConfigWithExtras).trailingSlash;
-    const templateOverride = (config as ConfigWithExtras).templates?.paymentReceived;
 
     const { amountCents, currency } = integrationAmount(session);
     const alternateProviderRef = paymentLinkId(session);
@@ -197,22 +201,12 @@ export const POST: APIRoute = async ({ request }) => {
       },
       {
         storage,
-        notify: (data: PaymentReceivedNotifyData) => {
-          const notifyTo = data.formId ? config.forms[data.formId]?.notifyTo : undefined;
-          if (!notifyTo) return Promise.resolve(undefined);
-          return sendPaymentReceivedEmail(
-            {
-              siteId: data.siteId,
-              formId: data.formId,
-              notifyTo,
-              amountCents: data.amountCents ?? 0,
-              currency: data.currency ?? 'usd',
-              provider: data.provider,
-              entryUrl: `${config.siteUrl}${adminUrl(`/forms-admin/entries/${data.entryId}`, trailingSlash)}`,
-            },
-            { template: templateOverride },
-          );
-        },
+        // 0.1.18: shared with the PayPal route; falls back past a missing form (payment-notify.ts).
+        notify: createPaymentReceivedNotifier({
+          config: config as ConfigWithExtras,
+          send: sendPaymentReceivedEmail,
+          log,
+        }),
         deliver: deliverWebhook,
         log,
       },

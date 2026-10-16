@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  captureOrder,
   createOrder,
   getAccessToken,
   paypalBaseUrl,
@@ -183,8 +184,37 @@ describe('createOrder', () => {
       application_context: {
         return_url: 'https://site.example/forms-pay/paypal-return/',
         cancel_url: 'https://site.example/forms-pay/?amount=200.50',
+        user_action: 'PAY_NOW',
       },
     });
+  });
+
+  // 0.1.18: the return page captures the order the moment the payer lands
+  // on it. Without user_action PayPal defaults to CONTINUE, a "Continue"
+  // button for flows that send the payer back WITHOUT processing the payment
+  // (final amount not yet known). PAY_NOW shows "Pay Now": the amount is
+  // final and the payment is processed immediately, which is what happens.
+  it('declares the immediate-capture flow: user_action PAY_NOW, so PayPal shows "Pay Now" rather than "Continue"', async () => {
+    const fetchMock = mockFetch({
+      '/v1/oauth2/token': () => ({ ok: true, json: async () => tokenFixture }),
+      '/v2/checkout/orders': () => ({ ok: true, json: async () => orderFixture }),
+    });
+
+    await createOrder(
+      {
+        totalCents: 100,
+        currency: 'usd',
+        entryId: 'entry_paynow',
+        returnUrl: 'https://site.example/forms-pay/paypal-return',
+        cancelUrl: 'https://site.example/forms-pay',
+      },
+      { fetch: fetchMock as unknown as typeof fetch },
+    );
+
+    const orderCall = fetchMock.mock.calls.find(([url]) => (url as string).includes('/v2/checkout/orders'))!;
+    const [, init] = orderCall as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { application_context: { user_action?: string } };
+    expect(body.application_context.user_action).toBe('PAY_NOW');
   });
 
   it('B1: passes returnUrl/cancelUrl through byte-verbatim (trailing-slash-shaped returnUrl)', async () => {
@@ -474,4 +504,164 @@ describe('verifyPaypalWebhookSignature', () => {
       fetchMock.mock.calls.some(([url]) => (url as string).includes('/v1/notifications/verify-webhook-signature')),
     ).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------------------
+// captureOrder (0.1.18). Up to 0.1.17 the package created `intent: CAPTURE`
+// orders and never captured them after the buyer approved, so no money moved
+// and PAYMENT.CAPTURE.COMPLETED never fired. Capture is
+// POST /v2/checkout/orders/{id}/capture with a FRESH PayPal-Request-Id per
+// attempt. PayPal replays the stored answer for a reused id, so an id fixed
+// per order would replay an INSTRUMENT_DECLINED (or a pre-approval
+// ORDER_NOT_APPROVED) after the payer fixed it in PayPal. A reload or double
+// hit cannot capture twice because PayPal allows one capture per
+// CAPTURE-intent order (ORDER_ALREADY_CAPTURED, mapped in paypal-return.ts).
+// ---------------------------------------------------------------------------
+
+describe('captureOrder', () => {
+  const ORDER_ID = '5O190127TN364715T';
+  /** `crypto.randomUUID()` output (RFC 4122 v4). */
+  const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const captureUrl = `https://api-m.sandbox.paypal.com/v2/checkout/orders/${ORDER_ID}/capture`;
+
+  /** A 2xx capture body (Prefer: return=representation): the order, and the capture inside its purchase unit. */
+  const captured = (captureStatus: string, orderStatus = 'COMPLETED') => ({
+    id: ORDER_ID,
+    status: orderStatus,
+    purchase_units: [{ payments: { captures: [{ id: '3C679366HH908993F', status: captureStatus }] } }],
+  });
+
+  /** PayPal's documented error envelope: name, details[].issue, debug_id. */
+  const paypalError = (issue: string, name = 'UNPROCESSABLE_ENTITY') => ({
+    name,
+    details: [{ issue, description: 'from PayPal' }],
+    debug_id: 'f1e2d3c4b5a6',
+  });
+
+  /** Capture handler first: the order-create pattern '/v2/checkout/orders' is a prefix of the capture URL. */
+  function captureFetch(response: () => unknown) {
+    return mockFetch({
+      '/capture': response,
+      '/v1/oauth2/token': () => ({ ok: true, status: 200, json: async () => tokenFixture }),
+    });
+  }
+
+  it('POSTs the documented capture call: bearer token, a UUID idempotency key, full representation, no body', async () => {
+    const fetchMock = captureFetch(() => ({ ok: true, status: 201, json: async () => captured('COMPLETED') }));
+
+    const result = await captureOrder(ORDER_ID, { fetch: fetchMock as unknown as typeof fetch });
+
+    expect(result).toEqual({ ok: true, orderStatus: 'COMPLETED', captureStatus: 'COMPLETED' });
+    const captureCall = fetchMock.mock.calls.find(([url]) => (url as string).includes('/capture'))!;
+    const [url, init] = captureCall as [string, RequestInit];
+    expect(url).toBe(captureUrl);
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({
+      Authorization: `Bearer ${ACCESS_TOKEN}`,
+      'Content-Type': 'application/json',
+      'PayPal-Request-Id': expect.stringMatching(UUID_PATTERN),
+      Prefer: 'return=representation',
+    });
+    expect(init.body).toBeUndefined();
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('two capture attempts for the same order send DIFFERENT PayPal-Request-Ids, so a retry after a decline is a new request, not a replay', async () => {
+    const fetchMock = captureFetch(() => ({ ok: true, status: 200, json: async () => captured('COMPLETED') }));
+
+    await captureOrder(ORDER_ID, { fetch: fetchMock as unknown as typeof fetch });
+    await captureOrder(ORDER_ID, { fetch: fetchMock as unknown as typeof fetch });
+
+    const requestIds = fetchMock.mock.calls
+      .filter(([url]) => (url as string).includes('/capture'))
+      .map(([, init]) => ((init as RequestInit).headers as Record<string, string>)['PayPal-Request-Id']);
+    expect(requestIds).toHaveLength(2);
+    expect(requestIds[0]).toMatch(UUID_PATTERN);
+    expect(requestIds[1]).toMatch(UUID_PATTERN);
+    expect(requestIds[0]).not.toBe(requestIds[1]);
+  });
+
+  it('reports a pending capture as such (PayPal took the order but has not settled the money)', async () => {
+    const fetchMock = captureFetch(() => ({ ok: true, status: 201, json: async () => captured('PENDING') }));
+
+    expect(await captureOrder(ORDER_ID, { fetch: fetchMock as unknown as typeof fetch })).toEqual({
+      ok: true,
+      orderStatus: 'COMPLETED',
+      captureStatus: 'PENDING',
+    });
+  });
+
+  it.each([
+    ['ORDER_ALREADY_CAPTURED', 422],
+    ['INSTRUMENT_DECLINED', 422],
+    ['ORDER_NOT_APPROVED', 422],
+    ['PREVIOUS_REQUEST_IN_PROGRESS', 409],
+  ])('a %s error comes back as {ok:false} with the issue, HTTP status and debug id (never thrown)', async (issue, status) => {
+    const fetchMock = captureFetch(() => ({ ok: false, status, json: async () => paypalError(issue) }));
+
+    expect(await captureOrder(ORDER_ID, { fetch: fetchMock as unknown as typeof fetch })).toEqual({
+      ok: false,
+      httpStatus: status,
+      issue,
+      debugId: 'f1e2d3c4b5a6',
+    });
+  });
+
+  it('an error body without details falls back to the error name as the issue', async () => {
+    const fetchMock = captureFetch(() => ({
+      ok: false,
+      status: 404,
+      json: async () => ({ name: 'RESOURCE_NOT_FOUND', debug_id: 'abc' }),
+    }));
+
+    expect(await captureOrder(ORDER_ID, { fetch: fetchMock as unknown as typeof fetch })).toEqual({
+      ok: false,
+      httpStatus: 404,
+      issue: 'RESOURCE_NOT_FOUND',
+      debugId: 'abc',
+    });
+  });
+
+  it('resolves {ok:false} (never rejects) on a network throw or an unparseable body', async () => {
+    const throwing = vi.fn(async (url: string) => {
+      if (url.includes('/v1/oauth2/token')) return { ok: true, status: 200, json: async () => tokenFixture };
+      throw new Error('network down');
+    });
+    expect(await captureOrder(ORDER_ID, { fetch: throwing as unknown as typeof fetch })).toEqual({ ok: false });
+
+    const garbled = captureFetch(() => ({
+      ok: false,
+      status: 500,
+      json: async () => {
+        throw new Error('Unexpected token');
+      },
+    }));
+    expect(await captureOrder(ORDER_ID, { fetch: garbled as unknown as typeof fetch })).toEqual({
+      ok: false,
+      httpStatus: 500,
+    });
+  });
+
+  it('resolves {ok:false} without calling the capture endpoint when no access token can be had', async () => {
+    const fetchMock = mockFetch({
+      '/capture': () => ({ ok: true, status: 201, json: async () => captured('COMPLETED') }),
+      '/v1/oauth2/token': () => ({ ok: false, status: 401, json: async () => ({}) }),
+    });
+
+    expect(await captureOrder(ORDER_ID, { fetch: fetchMock as unknown as typeof fetch })).toEqual({ ok: false });
+    expect(fetchMock.mock.calls.some(([url]) => (url as string).includes('/capture'))).toBe(false);
+  });
+
+  // The id goes into the request path. PayPal documents order ids as
+  // ^[A-Z0-9]+$ (1-36 chars); anything else is refused before any network
+  // call, so no value can reshape the path.
+  it.each(['', '../../v1/oauth2/token', 'abc123', 'A'.repeat(37), 'ORDER 1', 'ORDER%2F1'])(
+    'refuses a malformed order id %j before any network call',
+    async (orderId) => {
+      const fetchMock = captureFetch(() => ({ ok: true, status: 201, json: async () => captured('COMPLETED') }));
+
+      expect(await captureOrder(orderId, { fetch: fetchMock as unknown as typeof fetch })).toEqual({ ok: false });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
 });

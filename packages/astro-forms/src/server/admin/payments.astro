@@ -12,8 +12,7 @@
 import config from 'virtual:cool-astro-forms/config';
 import type { Payment } from '../../types.js';
 import { logError } from '../log.js';
-import { getDb } from '../storage/db.js';
-import { SqliteStorage } from '../storage/sqlite.js';
+import { getStorageAdapter } from '../storage/index.js';
 import { ADMIN_STYLE_HASH, parsePaymentFilter, renderAdminPageHtml, renderPaymentsTableHtml } from './_shared.js';
 
 export const prerender = false;
@@ -32,7 +31,8 @@ let total = 0;
 let error = false;
 
 try {
-  const storage = new SqliteStorage(getDb(config.dbPath));
+  // 0.1.18: same construction point as the routes — honours storage.kind ('turso') instead of hard-coding SQLite.
+  const storage = await getStorageAdapter(config);
   const [fetchedPayments, fetchedTotal] = await Promise.all([
     storage.listPayments(filter),
     storage.countPayments(filter),

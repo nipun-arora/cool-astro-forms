@@ -46,7 +46,26 @@ type StorageKind = 'sqlite' | 'turso';
 
 /** Minimal shape this factory needs from the dynamically imported turso.js module. */
 interface TursoModule {
-  TursoStorage: new (dbUrl?: string, authToken?: string) => StorageAdapter;
+  TursoStorage: new (dbUrl?: string, authToken?: string) => StorageAdapter & { readonly ready?: Promise<void> };
+}
+
+/**
+ * One TursoStorage per (URL, token) per process (0.1.18). Every request
+ * acquires storage through this factory (the middleware's sweeps on all of
+ * them, the admin pages too as of 0.1.18), and a new TursoStorage each time
+ * meant a new libSQL client plus a migration check round trip per call. A
+ * cached instance whose connect failed is dropped once its `ready` rejects,
+ * so a Turso outage at cold start is retried on the next request instead of
+ * pinning a dead client for the life of the process. `ready` is typed
+ * optional only so a stand-in module without it still constructs; the real
+ * TursoStorage always defines it. SQLite needs no cache here: `getDb`
+ * already keeps one connection per path and SqliteStorage is a thin wrapper.
+ */
+const tursoAdapters = new Map<string, StorageAdapter>();
+
+/** Test-only reset for the per-process TursoStorage cache. */
+export function resetStorageAdapterCache(): void {
+  tursoAdapters.clear();
 }
 
 /** The package's own bare specifier for its Turso adapter (05-03 exports subpath). Kept as a non-literal so `import()` below never triggers TS's literal-specifier module resolution (see file docstring). */
@@ -71,7 +90,19 @@ export async function getStorageAdapter(config?: CoolFormsConfig): Promise<Stora
 
   if (kind === 'turso') {
     const { TursoStorage } = (await import(TURSO_MODULE_SPECIFIER)) as TursoModule;
-    return new TursoStorage(process.env.CAF_TURSO_DATABASE_URL, process.env.CAF_TURSO_AUTH_TOKEN);
+    const url = process.env.CAF_TURSO_DATABASE_URL;
+    const token = process.env.CAF_TURSO_AUTH_TOKEN;
+    // Looked up after the await, so two cold-start calls racing here share one instance.
+    const key = JSON.stringify([url ?? null, token ?? null]);
+    const cached = tursoAdapters.get(key);
+    if (cached) return cached;
+
+    const storage = new TursoStorage(url, token);
+    tursoAdapters.set(key, storage);
+    storage.ready?.catch(() => {
+      if (tursoAdapters.get(key) === storage) tursoAdapters.delete(key);
+    });
+    return storage;
   }
 
   return new SqliteStorage(getDb(config?.dbPath));

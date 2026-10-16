@@ -146,9 +146,11 @@ export interface HandleInboundPaymentInput {
  * config access — siteId/formId come from the payment's anchor entry
  * (`storage.getEntryById`), never a config lookup. "sendPaymentReceivedEmail
  * -shaped": the caller's bound `notify` dep resolves the config-dependent
- * notifyTo (`config.forms[formId]?.notifyTo`), the `templates.paymentReceived`
- * override (W3), and the entryUrl before ultimately calling the real
- * `sendPaymentReceivedEmail` — this handler stays framework/config-free.
+ * notifyTo (0.1.18: `resolvePaymentNotifyTo` in ./payment-notify.ts — the
+ * entry's form, then `payments.notifyTo`, then the first configured form),
+ * the `templates.paymentReceived` override (W3), and the entryUrl before
+ * ultimately calling the real `sendPaymentReceivedEmail` — this handler stays
+ * framework/config-free.
  */
 export interface PaymentReceivedNotifyData {
   siteId: string;

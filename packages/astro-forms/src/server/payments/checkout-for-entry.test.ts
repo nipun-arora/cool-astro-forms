@@ -178,6 +178,8 @@ describe('createCheckoutForEntry — happy path', () => {
         payment_intent_data: {
           metadata: { booking_ref: 'REF-1234', entry_id: 'entry-1' },
           description: 'Example Tours booking REF-1234',
+          // 0.1.18: a live-mode receipt goes to the payer whatever the dashboard email setting.
+          receipt_email: 'guest@example.com',
         },
       },
       { idempotencyKey: 'quote-7f3c' },
@@ -397,6 +399,198 @@ describe('createCheckoutForEntry — customer attribution', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 0.1.18 payer receipt. Up to 0.1.17 the session named no receipt address, so
+// Stripe emailed the payer a receipt only when the dashboard's "Successful
+// payments" email setting was on. `payment_intent_data.receipt_email` makes
+// Stripe send it for a live-mode payment regardless (never in test mode).
+// It is derived from the INPUT email, never from the customer lookup, so the
+// two customer shapes a reused idempotency key can produce stay identical in
+// everything but the customer fields, and Stripe can replay the first one.
+// ---------------------------------------------------------------------------
+
+describe('createCheckoutForEntry — payer receipt (0.1.18)', () => {
+  const run = (overrides: Partial<CreateCheckoutForEntryInput>, client: Stripe) =>
+    createCheckoutForEntry(input(overrides), { client, storage: fakeStorage(), now: () => NOW });
+  const receiptEmail = (create: ReturnType<typeof vi.fn>, call = 0): unknown =>
+    (create.mock.calls[call]![0] as { payment_intent_data: Record<string, unknown> }).payment_intent_data.receipt_email;
+
+  it("sends receipt_email = the payer's normalized email, with or without an adopted Customer and when the lookup fails", async () => {
+    for (const customers of [
+      fakeCustomers(),
+      fakeCustomers({ seed: [adopted()] }),
+      fakeCustomers({ failList: true, seed: [adopted()] }),
+    ]) {
+      const { client, create } = fakeClient({ customers });
+
+      const result = await run({ customerEmail: 'Guest@Example.COM' }, client);
+
+      expect(result.ok).toBe(true);
+      expect(receiptEmail(create)).toBe('guest@example.com');
+    }
+  });
+
+  it('sends no receipt_email without a customerEmail (Checkout collects the address; the dashboard setting then decides)', async () => {
+    const { client, create } = fakeClient();
+
+    await run({ customerEmail: undefined }, client);
+
+    expect((create.mock.calls[0]![0] as { payment_intent_data: object }).payment_intent_data).not.toHaveProperty(
+      'receipt_email',
+    );
+  });
+
+  it('the customer-shape resend under a reused key carries the SAME receipt_email as both earlier requests (only the customer fields differ)', async () => {
+    const customers = fakeCustomers({ failList: (call) => call === 0, seed: [adopted()] });
+    const { client, create } = fakeClient({
+      customers,
+      create: vi.fn(async (params: { customer?: string; expires_at: number }) => {
+        // The first request (no Customer) took the key; a second shape is refused.
+        if (create.mock.calls.length === 2 && params.customer) {
+          throw Object.assign(new Error('Keys for idempotent requests can only be used with the same parameters'), {
+            type: 'StripeIdempotencyError',
+            rawType: 'idempotency_error',
+          });
+        }
+        return { id: 'cs_test_desk_1', url: 'https://checkout.stripe.com/c/pay/cs_test_desk_1', expires_at: params.expires_at };
+      }),
+    });
+
+    await run({}, client);
+    await run({ customerEmail: 'GUEST@example.com' }, client);
+
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(create.mock.calls.map((_call, index) => receiptEmail(create, index))).toEqual([
+      'guest@example.com',
+      'guest@example.com',
+      'guest@example.com',
+    ]);
+    const withoutCustomerFields = (params: Record<string, unknown>) => {
+      const { customer, customer_creation, customer_email, saved_payment_method_options, ...rest } = params;
+      void customer;
+      void customer_creation;
+      void customer_email;
+      void saved_payment_method_options;
+      return rest;
+    };
+    expect(withoutCustomerFields(create.mock.calls[1]![0] as Record<string, unknown>)).toEqual(
+      withoutCustomerFields(create.mock.calls[0]![0] as Record<string, unknown>),
+    );
+    expect(create.mock.calls[2]![0]).toEqual(create.mock.calls[0]![0]);
+  });
+
+  // receipt_email overrides a merchant who turned Stripe receipts off on
+  // purpose. payerReceipts: 'dashboard' leaves the decision to that setting.
+  it("payerReceipts 'dashboard' sends no receipt_email, with or without an adopted Customer and when the lookup fails", async () => {
+    for (const customers of [
+      fakeCustomers(),
+      fakeCustomers({ seed: [adopted()] }),
+      fakeCustomers({ failList: true, seed: [adopted()] }),
+    ]) {
+      const { client, create } = fakeClient({ customers });
+
+      const result = await run({ customerEmail: 'guest@example.com', payerReceipts: 'dashboard' }, client);
+
+      expect(result.ok).toBe(true);
+      expect(JSON.stringify(create.mock.calls[0]![0])).not.toContain('receipt_email');
+    }
+  });
+
+  it("payerReceipts 'always' is the same as leaving it out", async () => {
+    const { client, create } = fakeClient();
+
+    await run({ payerReceipts: 'always' }, client);
+
+    expect(receiptEmail(create)).toBe('guest@example.com');
+  });
+
+  it("under payerReceipts 'dashboard' the customer-shape resend still matches the first request exactly, so Stripe replays it", async () => {
+    const customers = fakeCustomers({ failList: (call) => call === 0, seed: [adopted()] });
+    const { client, create } = fakeClient({
+      customers,
+      create: vi.fn(async (params: { customer?: string; expires_at: number }) => {
+        if (create.mock.calls.length === 2 && params.customer) {
+          throw Object.assign(new Error('Keys for idempotent requests can only be used with the same parameters'), {
+            type: 'StripeIdempotencyError',
+            rawType: 'idempotency_error',
+          });
+        }
+        return { id: 'cs_test_desk_1', url: 'https://checkout.stripe.com/c/pay/cs_test_desk_1', expires_at: params.expires_at };
+      }),
+    });
+
+    await run({ payerReceipts: 'dashboard' }, client);
+    await run({ payerReceipts: 'dashboard' }, client);
+
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(create.mock.calls[2]![0]).toEqual(create.mock.calls[0]![0]);
+    expect(JSON.stringify(create.mock.calls)).not.toContain('receipt_email');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.1.18 product name. A host page may pass text a visitor typed (a tour
+// name, a booking note) as productName. It becomes the Checkout line item and
+// the PaymentIntent description the payer and the Stripe dashboard show, so
+// it is cleaned like the pay page's label: control characters and lone
+// surrogate halves removed, whitespace collapsed, at most 100 characters, and
+// "Payment" when nothing is left.
+// ---------------------------------------------------------------------------
+
+describe('createCheckoutForEntry — product name cleaning (0.1.18)', () => {
+  const run = (productName: string, client: Stripe) =>
+    createCheckoutForEntry(input({ productName }), { client, storage: fakeStorage(), now: () => NOW });
+  const sent = (create: ReturnType<typeof vi.fn>, call = 0) => {
+    const params = create.mock.calls[call]![0] as {
+      line_items: [{ price_data: { product_data: { name: string } } }];
+      payment_intent_data: { description: string };
+    };
+    return { name: params.line_items[0].price_data.product_data.name, description: params.payment_intent_data.description };
+  };
+
+  it('caps a long product name at 100 characters on the line item and the PaymentIntent description', async () => {
+    const { client, create } = fakeClient();
+
+    const result = await run('Safari '.repeat(40), client);
+
+    expect(result.ok).toBe(true);
+    const { name, description } = sent(create);
+    expect(Array.from(name)).toHaveLength(100);
+    expect(name.startsWith('Safari Safari')).toBe(true);
+    expect(name).toBe(name.trim());
+    expect(description).toBe(name);
+  });
+
+  it('removes control characters and collapses whitespace', async () => {
+    const { client, create } = fakeClient();
+
+    await run('  Serengeti\u0000 tour\r\n\r\n2\u001b[31m adults\t\t', client);
+
+    expect(sent(create)).toEqual({ name: 'Serengeti tour 2[31m adults', description: 'Serengeti tour 2[31m adults' });
+  });
+
+  it('sends a well-formed name for a product name with a lone surrogate (the Stripe SDK would throw URIError on it)', async () => {
+    const { client, create } = fakeClient();
+
+    const result = await run('Tour \uD83E booking \u{1F981}', client);
+
+    expect(result.ok).toBe(true);
+    const { name, description } = sent(create);
+    // The Stripe SDK form-encodes with encodeURIComponent, which throws on a lone surrogate.
+    expect(() => encodeURIComponent(name)).not.toThrow();
+    expect(() => encodeURIComponent(description)).not.toThrow();
+    expect(name).toBe('Tour booking \u{1F981}');
+  });
+
+  it('falls back to "Payment" when nothing is left after cleaning', async () => {
+    const { client, create } = fakeClient();
+
+    await run(' \u0000\u0007\n\t ', client);
+
+    expect(sent(create)).toEqual({ name: 'Payment', description: 'Payment' });
+  });
+});
+
 describe('createCheckoutForEntry — refuses BEFORE calling Stripe', () => {
   it('an unknown entry: entry-not-found, Stripe never called, nothing recorded', async () => {
     const { client, create, customers } = fakeClient();
@@ -453,6 +647,7 @@ describe('createCheckoutForEntry — refuses BEFORE calling Stripe', () => {
     ['a customer name over 200 characters', { customerName: 'n'.repeat(201) }],
     ['a customer name that is not a string', { customerName: 42 as unknown as string }],
     ['metadata that tries to set entry_id', { metadata: { entry_id: 'other-entry' } }],
+    ['an unknown payerReceipts value', { payerReceipts: 'never' as unknown as 'always' }],
     ['an empty entry id', { entryId: '' }],
   ])('rejects %s as invalid-input without touching storage or Stripe', async (_label, overrides) => {
     const { client, create, customers } = fakeClient();

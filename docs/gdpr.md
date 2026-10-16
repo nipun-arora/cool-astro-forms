@@ -46,6 +46,14 @@ this visitor look at before they filled this in." It is bounded in both
 step count and byte size, and steps older than a fixed age are pruned
 automatically — it is not an unbounded browsing-history log.
 
+With `requireConsent: true` the trail waits for consent too (0.1.18): no page
+view is recorded, in `localStorage` or in memory, until consent is granted,
+and `window.caf.consentGranted()` starts the trail on the page where consent
+was given. Earlier pages are never backfilled. Up to 0.1.17 the trail was
+written from the first page view whatever `requireConsent` said; on upgrade,
+a trail an older version stored before consent is cleared the next time a
+page loads without consent.
+
 **Relevant concept:** behavioral tracking tied to the same pseudonymous
 identifier above — relevant to both **data minimisation** (the trail is
 capped and query-stripped by default, see `journeyParams` below) and
@@ -158,7 +166,8 @@ touched, no network activity begun — until the host page explicitly signals
 consent via the client API (`grantConsent()`, or setting
 `window.__cafConsent = true` directly). This is a real gate checked before
 any data-touching code runs, not a UI-only checkbox that the underlying
-capture logic ignores.
+capture logic ignores. The journey trail above is behind the same gate from
+0.1.18 (before that it was recorded regardless).
 
 **Relevant concept:** this is the mechanic you'd wire up if your chosen
 lawful basis for capturing abandonment/journey data at all is **consent**

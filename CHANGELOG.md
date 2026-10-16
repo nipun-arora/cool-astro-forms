@@ -9,6 +9,132 @@ below as **BREAKING** rather than held for a 1.0 major.
 
 Entries are newest first.
 
+## [0.1.18] - 2026-10-16
+
+### Fixed
+
+- **`/forms-pay` and `create-session` payments now send the "payment
+  received" owner email.** Through 0.1.17 the Stripe and PayPal webhooks read
+  the address only as `config.forms[formId].notifyTo`, and a payment made on
+  `/forms-pay` (or posted to `/api/forms/pay/create-session` from a host's own
+  pay page) belongs to a `_payment_request` entry that no host registers as a
+  form. The owner got no email, and nothing was logged. Both webhooks now
+  resolve the address in this order:
+  1. the `notifyTo` of the form the payment's entry belongs to (a
+     host-registered `_payment_request` form wins here);
+  2. the new optional `payments.notifyTo`;
+  3. the `notifyTo` of the first form in `forms`, in config order.
+
+  When none resolves, nothing is sent and `payment.notify-skipped` is logged
+  (reason only: no address, amount or payer data).
+  - **Upgrading:** set `payments.notifyTo` to the inbox that should hear about
+    `/forms-pay` payments. Without it, those emails now go to the first
+    form's `notifyTo`.
+- **The abandoned-lead alert no longer fires on a tab switch followed by the
+  real submission.** The abandon beacon also fires on `visibilitychange` to
+  hidden, so a visitor who switched tabs mid-form and then submitted produced
+  an "Abandoned" email (and an `entry.abandoned` webhook) followed by the real
+  submission. Both are now deferred by `forms.<id>.abandonment.alertDelayMins`
+  (default `15`; `0` is immediate, the behaviour through 0.1.17) and are
+  cancelled when the draft is submitted inside the window. The draft row is
+  still saved, and listed in `/forms-admin/abandoned`, immediately.
+  - **How it is sent.** A request-driven sweep in the middleware (at most once
+    a minute per process) sends due alerts, and it runs with
+    `recovery.enabled` off. On a quiet site the alert goes at or after the
+    delay, never before.
+  - **Upgrading:** storage migration v7 adds two nullable columns to
+    `entries`, `abandon_notify_due_at` and `abandon_notified_at`, and a
+    partial index. It runs on the next boot for both SQLite and Turso, and
+    nothing is renamed or dropped. Existing drafts are not alerted by the
+    upgrade. On SQLite, an older version refuses to open a database migrated
+    to v7 (it says to restore a backup), so to roll back to 0.1.17 restore a
+    database backup taken before the upgrade.
+  - A custom storage adapter that does not implement the two new optional
+    methods (`findDueAbandonAlerts`, `claimAbandonAlert`) keeps the immediate
+    alert.
+  - A crash between the sweep claiming an alert and sending it drops that one
+    alert rather than risk a duplicate.
+  - **Bot drafts cannot hold up real alerts.** The sweep lists drafts carrying
+    the Turnstile soft-fail flag after the clean ones, so a backlog of bot
+    drafts only delays itself. A pass now drains up to 8 batches or 5 seconds,
+    whichever comes first, instead of one batch a minute. The due-alert query
+    now uses its partial index rather than scanning every kept draft.
+  - **The bot flag survives later beacons, and bad rows cannot block the
+    queue.** A dedupe update keeps the draft's stored `_turnstile` flag, so a
+    flagged bot draft no longer sorts with the clean ones again after its next
+    beacon, and a beacon can no longer set, replace or clear the flag itself.
+    A due draft whose stored JSON cannot be read is now retired (its alert
+    cancelled, logged once by entry id) instead of staying pending, where a
+    full batch of them with the oldest due times stopped every alert behind
+    them.
+- **PayPal orders are now captured.** The package created PayPal orders with
+  `intent: CAPTURE` and never captured them after the buyer approved, so no
+  money moved and `PAYMENT.CAPTURE.COMPLETED` never fired. The payer's return
+  to `/forms-pay/paypal-return` now captures the order server-side:
+  - Only an order this install created is captured: the `token` must match a
+    stored PayPal payment still in `link_created`.
+  - Each attempt sends a fresh `PayPal-Request-Id`, and an order PayPal
+    reports as already captured is treated as done.
+  - A decline offers the approval link again.
+  - Admin-quote PayPal orders now also return to that page. They previously
+    returned to the site root and were never captured.
+  - The verified `PAYMENT.CAPTURE.COMPLETED` webhook stays the only writer of
+    `paid`; the return page never writes the payment row.
+  - PayPal orders now declare `user_action: 'PAY_NOW'`, so PayPal's button
+    reads "Pay Now" instead of its "Continue" default, which is meant for a
+    flow that returns without processing the payment. This matches capturing
+    on return.
+  - **Upgrading:** PayPal orders approved under 0.1.17 or earlier were never
+    captured. Check them in the PayPal dashboard.
+  - **Not yet drilled against the PayPal sandbox.**
+- **Admin pages use the configured storage adapter.** The Entries, Abandoned,
+  Payments, Analytics and entry-detail pages opened the local SQLite file
+  whatever `storage.kind` said, so a Turso deployment showed an empty admin.
+  They now read the same backend as the routes.
+- **Journey tracking respects `requireConsent`.** Through 0.1.17 the trail was
+  written from the first page view even on a site that withholds capture until
+  consent. With `requireConsent: true`, no trail is written before consent, a
+  trail stored before consent by an older version is cleared, and
+  `window.caf.consentGranted()` starts the trail on the page where consent was
+  given. Earlier pages are never backfilled.
+- **Turso: one client per database, and a failed connect no longer crashes the
+  process.** `getStorageAdapter` built a new Turso client, and ran a migration
+  check, on every call. It now reuses one per (URL, token) for the life of the
+  process. A client whose connect fails is dropped, so the next request
+  reconnects instead of keeping a dead client. A failed connect also no longer
+  surfaces as an unhandled rejection, which ends a Node process under its
+  default policy when nothing has called a method on that client yet (the
+  background sweeps can be its only user). Every storage method still rejects
+  with the connect error.
+
+### Changed
+
+- **Checkout Sessions with a known payer email now set
+  `payment_intent_data.receipt_email`,** so a live-mode payer gets a Stripe
+  receipt whatever the dashboard's "Successful payments" email setting says
+  (test mode never sends automatic receipts). Through 0.1.17 a receipt went
+  out only when that setting was on. Payment Links (admin quotes) and PayPal
+  are unaffected: the Payment Links API takes no `receipt_email`, and the
+  PayPal path never sends the payer's email to PayPal. The pay and success
+  page copy no longer promises a receipt it cannot guarantee.
+  - **New `payments.payerReceipts: 'always' | 'dashboard'`** (absent means
+    `'always'`). `'always'` is the behaviour above. `'dashboard'` never sets
+    `receipt_email`, so the dashboard's "Successful payments" setting alone
+    decides.
+  - **The trade-off:** `receipt_email` overrides the dashboard setting, and
+    the address is whatever the visitor typed on the pay page, so that
+    address receives a merchant-branded receipt. If you have turned Stripe
+    receipts off on purpose, set `'dashboard'`.
+  - `createCheckoutForEntry` takes a matching `payerReceipts` input. It does
+    not read the integration config, so a host that sets
+    `payments.payerReceipts` passes the same value there.
+- **Pay-link labels are cleaned.** The `label` on a `/forms-pay` link, and
+  `productName` on `createCheckoutForEntry`, are trimmed, stripped of control
+  characters, have whitespace runs collapsed and are cut to 100 characters
+  before they reach Stripe (line item name and PaymentIntent description) or
+  the entry memo. `/forms-pay` shows the cleaned label too. A label with
+  nothing left reads "Payment" on Stripe.
+
 ## [0.1.17] - 2026-10-16
 
 ### Changed

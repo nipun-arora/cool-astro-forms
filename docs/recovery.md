@@ -194,6 +194,47 @@ between visits, a follow-up may be a few minutes later than exactly
 forever," but not laser-precise either. There is no durable queue; a batch
 (`BATCH_LIMIT`, 25 rows) is claimed and sent per pass.
 
+### The owner's abandoned-lead alert has its own sweep (0.1.18)
+
+The abandoned-lead email to `notifyTo` and the `entry.abandoned` webhook are
+deferred by the same request-driven design (the abandon beacon also fires
+when a visitor only switches tabs, so an immediate alert could precede the
+real submission), but they are a separate sweep and not a recovery feature:
+
+| | Recovery follow-up | Abandoned-lead alert |
+|---|---|---|
+| Goes to | the visitor | `notifyTo`, plus your `entry.abandoned` webhook receivers |
+| Runs when | `recovery.enabled` (and the form is not opted out) | always, with recovery on or off |
+| Delay | `recovery.delayMins` (default 60) | `forms.<id>.abandonment.alertDelayMins` (default 15; `0` = immediate) |
+| Sweep pass | at most once per 15 minutes per process | at most once per minute per process |
+
+```ts
+forms: {
+  contact: {
+    notifyTo: 'owner@example.com',
+    abandonment: { alertDelayMins: 15 }, // 0 sends the alert on the save, as before 0.1.18
+  },
+},
+```
+
+A submission inside the window cancels the alert and the webhook: the draft
+is converted, so nobody abandoned. The draft row is saved, and listed in
+`/forms-admin/abandoned`, immediately either way. Like the follow-up, each due
+draft is claimed atomically before anything is sent, so racing sweeps send it
+once, and a crash between the claim and the send drops that one alert rather
+than risk a duplicate. On a quiet site the alert goes out with the first
+request the server handles after the delay: at or after it, never before.
+
+A pass is not limited to one batch: it claims batches until nothing more is
+due, up to 8 batches or 5 seconds. Drafts that failed the Turnstile check
+(the "Bot check" flag) are listed after the clean ones, so a backlog of bot
+drafts only delays itself and never holds a real lead's alert back. The
+due-alert query uses the pending-alert index instead of reading every kept
+draft.
+
+Migration v7 adds the two columns this needs to `entries`; drafts saved before
+the upgrade are not alerted by it.
+
 ## 7. What's deferred to a live drill
 
 Live SMTP delivery — a real follow-up landing in a real inbox, its

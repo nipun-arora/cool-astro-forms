@@ -68,6 +68,28 @@
  * genuinely reused for different params mismatches in both shapes and also
  * ends in `provider-error`.
  *
+ * Payer receipt (0.1.18): with a `customerEmail`, the session sets
+ * `payment_intent_data.receipt_email` to the normalized address, so Stripe
+ * emails the payer a receipt for a live-mode payment whatever the dashboard's
+ * customer email settings (test mode never sends automatic receipts); up to
+ * 0.1.17 one went out only if "Successful payments" emails were on. It is
+ * derived from the input email, never from the Customer lookup, so it is
+ * identical in both customer shapes and the one-time resend above still
+ * differs from the first request only in the customer fields. Without an
+ * email nothing is set and the dashboard setting decides. `payerReceipts:
+ * 'dashboard'` never sets it, for a merchant who turned Stripe receipts off
+ * on purpose (receipt_email overrides that, and lets a card tester make the
+ * account mail branded receipts to typed addresses). It is an input, not
+ * read from `payments.payerReceipts`: this function has no access to the
+ * integration config, so a host that sets that key passes it here too. Like
+ * the email, it is the same in both customer shapes.
+ *
+ * Product name (0.1.18): `productName` can carry text a visitor typed, and it
+ * is the line item name and PaymentIntent description the payer and the
+ * dashboard read, so it is cleaned (label.ts: control characters removed,
+ * whitespace collapsed, at most 100 characters; "Payment" when nothing is
+ * left), once, before either customer shape is built.
+ *
  * Clean-room: written against docs.stripe.com/api/checkout/sessions (create,
  * expire), docs.stripe.com/api/customers and docs.stripe.com/api/idempotent_requests,
  * not derived from any commercial form-plugin source.
@@ -78,6 +100,7 @@ import { log, logError } from '../log.js';
 import type { StorageAdapter } from '../storage/adapter.js';
 import { getStorageAdapter } from '../storage/index.js';
 import { findReusableStripeCustomer, isIdempotentReplay } from './customers.js';
+import { cleanPaymentLabel } from './label.js';
 
 /** Stripe's documented Checkout Session expiry window: 30 minutes to 24 hours after creation. */
 const MIN_EXPIRY_MS = 30 * 60_000;
@@ -102,8 +125,9 @@ export interface CreateCheckoutForEntryInput {
    * Customer an earlier verified payment by this address created, so repeat
    * payments share one Customer; otherwise it pre-fills the Checkout email
    * field and becomes the email of the Customer Stripe creates when the payer
-   * confirms. Stripe sends its receipt there when receipts are on in the
-   * dashboard.
+   * confirms. Since 0.1.18 it is also the session's `receipt_email`, so Stripe
+   * emails the receipt there for a live-mode payment even when receipts are
+   * off in the dashboard, unless `payerReceipts` is `'dashboard'`.
    */
   customerEmail?: string;
   /**
@@ -130,8 +154,22 @@ export interface CreateCheckoutForEntryInput {
   idempotencyKey: string;
   /** Extra string metadata for the session and its payment intent. `entry_id` is reserved (the package sets it). */
   metadata?: Record<string, string>;
-  /** The line item name on the Checkout page and receipt. Default "Payment". */
+  /**
+   * The line item name on the Checkout page and receipt, also the
+   * PaymentIntent description. Default "Payment". Since 0.1.18 control
+   * characters are removed, whitespace is collapsed and it is cut to 100
+   * characters, so it is safe to pass text a visitor typed.
+   */
   productName?: string;
+  /**
+   * Who sends the payer's receipt (0.1.18). `'always'` (default) sets the
+   * session's `receipt_email` to `customerEmail`, so Stripe emails a receipt
+   * for a live-mode payment even when receipts are off in the dashboard.
+   * `'dashboard'` never sets it: the dashboard's "Successful payments"
+   * setting alone decides. Pass your `payments.payerReceipts` value here;
+   * this function does not read the integration config.
+   */
+  payerReceipts?: 'always' | 'dashboard';
 }
 
 export interface CreateCheckoutForEntryDeps {
@@ -252,6 +290,9 @@ function validate(input: CreateCheckoutForEntryInput, now: number): string | und
   ) {
     return 'idempotencyKey must be 1-255 characters';
   }
+  if (input.payerReceipts !== undefined && input.payerReceipts !== 'always' && input.payerReceipts !== 'dashboard') {
+    return "payerReceipts must be 'always' or 'dashboard'";
+  }
   if (input.metadata !== undefined) {
     for (const [key, value] of Object.entries(input.metadata)) {
       if (key === 'entry_id') return 'metadata.entry_id is reserved: the package sets it from entryId';
@@ -298,6 +339,11 @@ export async function createCheckoutForEntry(
   const customerId = customerEmail ? await findReusableStripeCustomer({ email: customerEmail }, client) : undefined;
 
   const metadata = { ...(input.metadata ?? {}), entry_id: entryId };
+  // Cleaned once (label.ts), so both customer shapes send the same name.
+  const productName = cleanPaymentLabel(input.productName) ?? 'Payment';
+  // 0.1.18: from the input email and option, never the lookup, so both
+  // customer shapes send the same value; 'dashboard' sends none.
+  const receiptEmail = input.payerReceipts === 'dashboard' ? undefined : customerEmail;
   /** One builder for both customer shapes, so a resend differs from the first request only in the customer fields. */
   const sessionParams = (customer: string | undefined): Stripe.Checkout.SessionCreateParams => ({
     mode: 'payment',
@@ -307,7 +353,7 @@ export async function createCheckoutForEntry(
         price_data: {
           currency,
           unit_amount: input.amountCents,
-          product_data: { name: input.productName || 'Payment' },
+          product_data: { name: productName },
         },
         quantity: 1,
       },
@@ -327,7 +373,11 @@ export async function createCheckoutForEntry(
     success_url: input.successUrl,
     cancel_url: input.cancelUrl,
     metadata,
-    payment_intent_data: { metadata, description: input.productName || 'Payment' },
+    payment_intent_data: {
+      metadata,
+      description: productName,
+      ...(receiptEmail ? { receipt_email: receiptEmail } : {}),
+    },
   });
   const createSession = (customer: string | undefined) =>
     client.checkout.sessions.create(sessionParams(customer), { idempotencyKey: input.idempotencyKey });

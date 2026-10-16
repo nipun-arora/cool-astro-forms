@@ -86,7 +86,7 @@ npm run build
 node dist/server/entry.mjs
 ```
 
-The capture route is auto-injected at `/api/forms/abandon`. A visitor who types into that form and leaves lands a row in `data/forms.db` and a notification email at `notifyTo`. That is the entire adoption contract: one `coolForms()` call, one attribute. Payments, Drive uploads, lead recovery, and the admin UI stay inert until you opt in.
+The capture route is auto-injected at `/api/forms/abandon`. A visitor who types into that form and leaves lands a row in `data/forms.db` at once and, after a short delay (`abandonment.alertDelayMins`, 15 minutes by default), a notification email at `notifyTo`. That is the entire adoption contract: one `coolForms()` call, one attribute. Payments, Drive uploads, lead recovery, and the admin UI stay inert until you opt in.
 
 > **Deploying behind a proxy?** Most production Node hosts (Hostinger, Passenger/LiteSpeed, most PaaS) terminate TLS before your Node process, so Astro sees a plain-HTTP socket and only trusts the proxy's `X-Forwarded-Proto` header when `security.allowedDomains` is set. Without it, every urlencoded form POST to a server route fails with `403 Cross-site POST form submissions are forbidden`, and the first place you will meet that is the `/forms-admin` login form. Add your real domain once you deploy:
 >
@@ -126,7 +126,7 @@ With Astro's `security.csp` turned on, the `/forms-admin` pages stay styled and 
 
    ![Abandoned-leads view — every captured lead with its last-edited field, converted and bot-check columns](https://raw.githubusercontent.com/nipun-arora/cool-astro-forms/main/.github/assets/admin-abandoned.png)
 
-4. You get a notification email carrying the captured fields, the journey trail, the visitor's location, and the traffic source; the visitor sees a save-confirmed toast, and lead recovery (opt-in) sends one follow-up email with a link to finish.
+4. After a short delay (`forms.<id>.abandonment.alertDelayMins`, default 15 minutes; a submission inside it cancels the alert) you get a notification email carrying the captured fields, the journey trail, the visitor's location, and the traffic source; the visitor sees a save-confirmed toast, and lead recovery (opt-in) sends one follow-up email with a link to finish.
 
    ![The default abandoned-lead notification email: captured fields, journey trail with the referrer as step one, location line, and a link to the entry](https://raw.githubusercontent.com/nipun-arora/cool-astro-forms/main/.github/assets/email-notification.png)
 
@@ -150,11 +150,11 @@ Every trigger, gate, and fallback in detail, with screenshots: [docs/how-it-work
 
 | Feature | Detail |
 |---|---|
-| Abandonment capture | 4 triggers: exit-intent, external-link click, `beforeunload`, tab-hidden; dedupe window; per-form overrides |
+| Abandonment capture | 4 triggers: exit-intent, external-link click, `beforeunload`, tab-hidden; dedupe window; per-form overrides; owner alert deferred by `abandonment.alertDelayMins` (default 15, `0` = immediate) so a tab switch followed by a submit sends nothing |
 | User-journey tracking | Per-visitor page trail, shown on each entry's timeline |
 | IP geolocation | Every saved entry enriched (`GEO_PROVIDER` override supported); a failed lookup never blocks the save |
 | `/forms-admin` UI | Entries, abandoned, payments, analytics funnel, CSV + `.db` export; server-rendered, password-protected |
-| Payments | Quote-first Stripe Checkout + PayPal; shareable `/forms-pay?amount=` links; server-computed fees; fetch-first transport (edge-bot-challenge-proof checkout hop); inbound webhooks as the sole payment truth |
+| Payments | Quote-first Stripe Checkout + PayPal; shareable `/forms-pay?amount=` links; server-computed fees; fetch-first transport (edge-bot-challenge-proof checkout hop); inbound webhooks as the sole payment truth; "payment received" email to the form's `notifyTo`, else `payments.notifyTo`, else the first form's |
 | Spam control | Cloudflare Turnstile (soft-fail), honeypot, rate limiting |
 | File uploads | Google Drive via raw REST (no SDK); Drive failures fall back to email attachment, the entry always saves, and oversized files are flagged |
 | Lead recovery | One automated follow-up email per visitor, one-click unsubscribe honored forever |

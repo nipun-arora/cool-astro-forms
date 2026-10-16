@@ -14,8 +14,7 @@ import config from 'virtual:cool-astro-forms/config';
 import type { Entry, EntryStatus, FileRecord, Geo, Payment } from '../../types.js';
 import { logError } from '../log.js';
 import { paypalConfigured } from '../payments/paypal.js';
-import { getDb } from '../storage/db.js';
-import { SqliteStorage } from '../storage/sqlite.js';
+import { getStorageAdapter } from '../storage/index.js';
 import { escapeHtml, renderFieldsHtml, renderGeoLine, renderJourneyTimelineHtml } from '../templates.js';
 import { ADMIN_STYLE_HASH, adminUrl, renderAdminPageParts, renderPaymentsSectionHtml } from './_shared.js';
 
@@ -36,7 +35,8 @@ let files: FileRecord[] = [];
 let error = false;
 
 try {
-  const storage = new SqliteStorage(getDb(config.dbPath));
+  // 0.1.18: same construction point as the routes — honours storage.kind ('turso') instead of hard-coding SQLite.
+  const storage = await getStorageAdapter(config);
   entry = await storage.getEntryById(id);
   if (entry) {
     payments = await storage.getPaymentsByEntry(id);

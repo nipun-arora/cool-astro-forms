@@ -75,16 +75,23 @@ test.describe('Admin UI', () => {
     page,
     request,
   }) => {
+    // 0.1.18: the server ignores a client-sent `_turnstile` (anti-spoof), so
+    // the flag is written the way handle-abandon.ts writes it after a failed
+    // check -- server-side, via the dev-only debug endpoint's updateEntry seam.
     await postAbandon(
       request,
       abandonPayload({
         visitorUuid: `admin-e2e-turnstile-${Math.random().toString(36).slice(2)}`,
-        fields: { email: 'turnstile-flag@example.com', _turnstile: 'failed' },
+        fields: { email: 'turnstile-flag@example.com' },
       }),
       ADMIN_URL,
       ADMIN_URL,
     );
     const [row] = await waitForAbandoned(request, 1, ADMIN_URL);
+    const flagRes = await request.get(
+      `${ADMIN_URL}/api/debug-entries?action=flag-turnstile-failed&id=${encodeURIComponent(row!.id)}`,
+    );
+    expect(flagRes.ok()).toBe(true);
 
     await loginAsAdmin(page);
 
@@ -93,6 +100,34 @@ test.describe('Admin UI', () => {
 
     await page.goto(`${ADMIN_URL}/forms-admin/entries/${row!.id}`);
     await expect(page.locator('.flag-turnstile').first()).toBeVisible();
+  });
+
+  test('a client-sent _turnstile: "failed" in a beacon is ignored and produces no flag (0.1.18 anti-spoof)', async ({
+    page,
+    request,
+  }) => {
+    const visitorUuid = `admin-e2e-spoof-${Math.random().toString(36).slice(2)}`;
+    await postAbandon(
+      request,
+      abandonPayload({
+        visitorUuid,
+        fields: { email: 'turnstile-spoof@example.com', _turnstile: 'failed' },
+      }),
+      ADMIN_URL,
+      ADMIN_URL,
+    );
+    const [row] = await waitForAbandoned(request, 1, ADMIN_URL);
+    expect(row!.fields.email).toBe('turnstile-spoof@example.com');
+    expect(row!.fields._turnstile).toBeUndefined();
+
+    await loginAsAdmin(page);
+
+    await page.goto(`${ADMIN_URL}/forms-admin/abandoned`);
+    await expect(page.locator('body')).toContainText(visitorUuid);
+    await expect(page.locator('.flag-turnstile')).toHaveCount(0);
+
+    await page.goto(`${ADMIN_URL}/forms-admin/entries/${row!.id}`);
+    await expect(page.locator('.flag-turnstile')).toHaveCount(0);
   });
 
   test('the search filter narrows the Entries list', async ({ page, request }) => {

@@ -85,7 +85,15 @@
  */
 import { monotonicFactory } from 'ulid';
 import type { Client, InStatement, ResultSet, Transaction } from '@libsql/client';
-import type { StorageAdapter, UpsertAbandonedResult } from './adapter.js';
+import {
+  abandonedDraftFields,
+  alertAfterDedupeUpdate,
+  DUE_ABANDON_ALERTS_SQL,
+  type AbandonAlertSchedule,
+  type DueAbandonAlert,
+  type StorageAdapter,
+  type UpsertAbandonedResult,
+} from './adapter.js';
 import type {
   AnalyticsFilter,
   DropOffRow,
@@ -103,7 +111,7 @@ import type {
 import { PAYMENT_REQUEST_FORM_ID } from '../payment-constants.js';
 import { COLUMN_EXISTS_SQL, MIGRATION_SQL, addedColumn, migrationStatements } from './migrations.js';
 import { csvCell } from './csv.js';
-import { logError } from '../log.js';
+import { logError, warn } from '../log.js';
 
 const ulid = monotonicFactory();
 
@@ -131,6 +139,9 @@ interface RawEntryRow {
   last_field: string | null;
   recovery_sent_at: number | null;
   consent_at: number | null;
+  // 0.1.18 (migration v7): deferred abandoned-lead alert, mirrors sqlite.ts.
+  abandon_notify_due_at: number | null;
+  abandon_notified_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -150,6 +161,8 @@ type NewEntryInput = {
   lastField?: string;
   consentAt?: number;
   recoverySentAt?: number;
+  /** 0.1.18: the deferred abandoned-lead alert's due time (upsertAbandoned's create branch only). */
+  abandonNotifyDueAt?: number;
 };
 
 /** Row -> domain mapping. Same corrupted-row tolerance as sqlite.ts's mapRow (T-01 pattern). */
@@ -357,6 +370,11 @@ function buildPaymentWhere(filter: PaymentFilter): { clause: string; params: Arg
   return { clause: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', params };
 }
 
+/** libSQL can hand an INTEGER back as a bigint; the alert columns are compared and re-bound as plain numbers. */
+function nullableNumber(value: number | bigint | null): number | null {
+  return value === null ? null : Number(value);
+}
+
 function firstRow<T>(rs: ResultSet): T | undefined {
   return rs.rows.length > 0 ? (rs.rows[0] as unknown as T) : undefined;
 }
@@ -480,6 +498,21 @@ export class TursoStorage implements StorageAdapter {
 
   constructor(dbUrl = ':memory:', authToken?: string) {
     this.#ready = connectAndMigrate(dbUrl, authToken);
+    // 0.1.18: a failed connect is handled here, so an instance nothing has
+    // called a method on yet (getStorageAdapter caches one per database, and
+    // the middleware's background sweeps may be its only user) never raises
+    // an 'unhandledRejection', which ends the process under Node's default
+    // policy. Every method still awaits #ready and rejects with the error.
+    this.#ready.catch(() => {});
+  }
+
+  /**
+   * Settles once the client is connected and migrated; rejects with the
+   * connect or migration error (0.1.18). getStorageAdapter watches it to
+   * drop a dead cached instance, so the next request reconnects.
+   */
+  get ready(): Promise<void> {
+    return this.#ready.then(() => undefined);
   }
 
   /**
@@ -557,12 +590,13 @@ export class TursoStorage implements StorageAdapter {
       input.lastField ?? null,
       input.recoverySentAt ?? null,
       input.consentAt ?? null,
+      input.abandonNotifyDueAt ?? null,
       now,
       now,
     ];
     await exec.execute({
-      sql: `INSERT INTO entries (id, site_id, form_id, status, fields, visitor_uuid, ip, user_agent, geo, journey, page_url, referrer, last_field, recovery_sent_at, consent_at, created_at, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      sql: `INSERT INTO entries (id, site_id, form_id, status, fields, visitor_uuid, ip, user_agent, geo, journey, page_url, referrer, last_field, recovery_sent_at, consent_at, abandon_notify_due_at, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       args,
     });
     return id;
@@ -754,10 +788,11 @@ export class TursoStorage implements StorageAdapter {
     return lines.join('\n');
   }
 
-  /** Atomic dedupe (T-01-34) — SELECT + INSERT/UPDATE inside one write transaction, mirrors sqlite.ts's BEGIN IMMEDIATE. */
+  /** Atomic dedupe (T-01-34) — SELECT + INSERT/UPDATE inside one write transaction, mirrors sqlite.ts's BEGIN IMMEDIATE (0.1.18 alert schedule included). */
   async upsertAbandoned(
     input: Omit<Entry, 'id' | 'createdAt' | 'updatedAt' | 'status'>,
     windowMins: number,
+    alert?: AbandonAlertSchedule,
   ): Promise<UpsertAbandonedResult> {
     return this.withWriteTransaction(async (tx) => {
       const cutoff = Date.now() - windowMins * 60_000;
@@ -785,8 +820,17 @@ export class TursoStorage implements StorageAdapter {
       const now = Date.now();
 
       if (existingAbandoned) {
+        const schedule = alertAfterDedupeUpdate(
+          {
+            dueAt: nullableNumber(existingAbandoned.abandon_notify_due_at),
+            notifiedAt: nullableNumber(existingAbandoned.abandon_notified_at),
+            createdAt: Number(existingAbandoned.created_at),
+          },
+          alert,
+        );
         const args: Arg[] = [
-          JSON.stringify(input.fields ?? {}),
+          // 0.1.18: the stored row's Turnstile flag survives the update (abandonedDraftFields).
+          JSON.stringify(abandonedDraftFields(input.fields, existingAbandoned.fields)),
           input.ip ?? null,
           input.userAgent ?? null,
           input.geo !== undefined ? JSON.stringify(input.geo) : null,
@@ -795,17 +839,24 @@ export class TursoStorage implements StorageAdapter {
           input.referrer ?? null,
           input.lastField ?? null,
           now,
+          schedule.dueAt,
+          schedule.notifiedAt,
           existingAbandoned.id,
         ];
         await tx.execute({
-          sql: `UPDATE entries SET fields=?, ip=?, user_agent=?, geo=?, journey=?, page_url=?, referrer=?, last_field=?, updated_at=?
+          sql: `UPDATE entries SET fields=?, ip=?, user_agent=?, geo=?, journey=?, page_url=?, referrer=?, last_field=?, updated_at=?,
+                  abandon_notify_due_at=?, abandon_notified_at=?
                 WHERE id=?`,
           args,
         });
         return { outcome: 'updated', entry: mapRowOrThrow(await this.getRawById(tx, existingAbandoned.id)) };
       }
 
-      const id = await this.insertEntryRow(tx, { ...input, status: 'abandoned' }, now);
+      const id = await this.insertEntryRow(
+        tx,
+        { ...input, fields: abandonedDraftFields(input.fields), status: 'abandoned', abandonNotifyDueAt: alert?.dueAt },
+        now,
+      );
       return { outcome: 'created', entry: mapRowOrThrow(await this.getRawById(tx, id)) };
     });
   }
@@ -819,8 +870,9 @@ export class TursoStorage implements StorageAdapter {
       const cutoff = Date.now() - lookbackMs;
       const now = Date.now();
 
+      // 0.1.18: clearing the due time cancels the pending abandoned-lead alert.
       const result = await tx.execute({
-        sql: `UPDATE entries SET status='converted', updated_at=?
+        sql: `UPDATE entries SET status='converted', updated_at=?, abandon_notify_due_at=NULL
               WHERE site_id = ? AND visitor_uuid = ? AND form_id = ? AND status = 'abandoned' AND updated_at >= ?`,
         args: [now, input.siteId, input.visitorUuid, input.formId, cutoff],
       });
@@ -1087,6 +1139,52 @@ export class TursoStorage implements StorageAdapter {
       await tx.execute({ sql: 'UPDATE entries SET recovery_sent_at = ? WHERE id = ?', args: [now, entryId] });
       return true;
     });
+  }
+
+  /**
+   * Due alerts, clean drafts before Turnstile-flagged ones, each oldest due
+   * first — the one DUE_ABANDON_ALERTS_SQL sqlite.ts runs. An unreadable
+   * row is retired and the listing re-run, with the same termination
+   * argument as sqlite.ts.
+   */
+  async findDueAbandonAlerts(now: number, limit: number): Promise<DueAbandonAlert[]> {
+    const client = await this.#ready;
+    for (;;) {
+      const rows = allRows<RawEntryRow>(await client.execute({ sql: DUE_ABANDON_ALERTS_SQL, args: [now, limit] }));
+      const alerts: DueAbandonAlert[] = [];
+      let retired = false;
+      for (const row of rows) {
+        const entry = mapRow(row);
+        if (entry) {
+          alerts.push({ entry, alertedBefore: row.abandon_notified_at !== null });
+          continue;
+        }
+        await retryOnLock(() =>
+          client.execute({ sql: 'UPDATE entries SET abandon_notify_due_at = NULL WHERE id = ?', args: [row.id] }),
+        );
+        warn('abandon-alert.corrupt-row-retired', { id: row.id });
+        retired = true;
+      }
+      if (!retired || rows.length < limit) return alerts;
+    }
+  }
+
+  /**
+   * Exactly-once claim — one conditional UPDATE, which the server applies
+   * atomically, so overlapping sweeps on any number of instances get one
+   * winner (rowsAffected 1) without a transaction round trip. Mirrors
+   * sqlite.ts.
+   */
+  async claimAbandonAlert(entryId: string, now: number): Promise<boolean> {
+    const client = await this.#ready;
+    const result = await retryOnLock(() =>
+      client.execute({
+        sql: `UPDATE entries SET abandon_notify_due_at = NULL, abandon_notified_at = ?
+              WHERE id = ? AND status = 'abandoned' AND abandon_notify_due_at IS NOT NULL AND abandon_notify_due_at <= ?`,
+        args: [now, entryId, now],
+      }),
+    );
+    return result.rowsAffected === 1;
   }
 
   async suppressRecovery(visitorUuid: string, now: number): Promise<void> {

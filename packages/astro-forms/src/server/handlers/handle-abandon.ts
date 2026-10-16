@@ -6,7 +6,11 @@
  * Ordered pipeline (RESEARCH.md system diagram): origin -> size cap ->
  * rate limit -> parse/unknown-site-or-form -> honeypot -> visitor identity
  * -> gate -> journey recompute -> atomic dedupe save -> fire-and-forget
- * notify. Every reject/no-op branch (steps 1-7) logs exactly one structured
+ * notify. Since 0.1.18 the notify + entry.abandoned webhook step is
+ * normally DEFERRED: the save stores a due time and
+ * recovery/abandon-alerts.ts sends both later unless a submission promoted
+ * the draft first (`abandonment.alertDelayMins: 0`, or a custom storage
+ * adapter without the alert methods, keeps them here). Every reject/no-op branch (steps 1-7) logs exactly one structured
  * line via the injected `deps.log`. Genuine backend errors (storage throw,
  * notify rejection, purge failure) log via the real `logError` import —
  * `deps.log` is reserved for request-reject/no-op events only.
@@ -25,6 +29,7 @@ import { isSameOrigin } from '../security/origin-check.js';
 import { withinSizeCap } from '../security/size-cap.js';
 import type { StorageAdapter } from '../storage/adapter.js';
 import { logError } from '../log.js';
+import { abandonAlertDelayMins, canDeferAbandonAlerts } from '../recovery/abandon-alerts.js';
 import { recoveryEnabledForForm } from '../recovery/resolve.js';
 import { recomputeJourney } from './journey-server.js';
 
@@ -291,6 +296,14 @@ export async function handleAbandon(
   const storedFields = { ...payload.fields };
   delete storedFields[CAF_FIELD_NAME];
   for (const name of CAPTCHA_RESPONSE_FIELD_NAMES) delete storedFields[name];
+  // 0.1.18: the alert waits alertDelayMins after the first abandon (the
+  // beacon also fires on a tab switch). The schedule rides the save's own
+  // transaction; with notifyOnUpdate an update may re-arm one more alert.
+  const alertDelayMins = abandonAlertDelayMins(deps.config, payload.formId);
+  const deferAlert = alertDelayMins > 0 && canDeferAbandonAlerts(deps.storage);
+  const alertSchedule = deferAlert
+    ? { dueAt: now + alertDelayMins * 60_000, rearmOnUpdate: formConfig.abandonment.notifyOnUpdate }
+    : undefined;
   let result;
   try {
     result = await deps.storage.upsertAbandoned(
@@ -308,6 +321,7 @@ export async function handleAbandon(
         lastField: payload.lastField,
       },
       formConfig.abandonment.dedupeWindowMins,
+      alertSchedule,
     );
   } catch (err) {
     logError('abandon.storage-failed', err, logCtx);
@@ -364,7 +378,8 @@ export async function handleAbandon(
   // 9c. Outbound entry.abandoned webhook (HOOK-01) — fires ONLY on
   // first-time creation (never on a dedupe-update), fire-and-forget exactly
   // like notify below: never awaited, never blocks/reverts the response.
-  if (result.outcome === 'created' && result.entry) {
+  // Deferred (0.1.18): the sweep fires it instead, at the due time.
+  if (!deferAlert && result.outcome === 'created' && result.entry) {
     deps.deliverWebhook?.('entry.abandoned', {
       id: result.entry.id,
       siteId: payload.siteId,
@@ -377,9 +392,11 @@ export async function handleAbandon(
 
   // 10. Fire-and-forget notify — AFTER the save, NEVER awaited before the
   // response. Fires on 'created' always; on 'updated' only when the form's
-  // notifyOnUpdate is true (default false).
+  // notifyOnUpdate is true (default false). Deferred (0.1.18): the sweep
+  // sends it instead, reading the draft as stored at the due time.
   const shouldNotify =
-    result.outcome === 'created' || (result.outcome === 'updated' && formConfig.abandonment.notifyOnUpdate);
+    !deferAlert &&
+    (result.outcome === 'created' || (result.outcome === 'updated' && formConfig.abandonment.notifyOnUpdate));
   if (shouldNotify) {
     deps
       .notify({

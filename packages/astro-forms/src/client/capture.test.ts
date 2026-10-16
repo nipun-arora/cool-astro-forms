@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FIELD_MAX_BYTES, MAX_PAYLOAD_BYTES } from '../limits.js';
 import { CAF_FIELD_NAME } from '../types.js';
 import type { JourneyStep } from '../types.js';
@@ -929,5 +929,55 @@ describe('recovery seam: per-form scoping via __cafConfig.recovery.disabledForms
     const text = typeof sentBody === 'string' ? sentBody : await sentBody!.text();
     const payload = JSON.parse(text) as { recoveryOptIn?: boolean };
     expect(payload.recoveryOptIn).toBeUndefined();
+  });
+});
+
+// 0.1.18: consentGranted() starts the journey trail on the page where consent
+// was given. Cookie banners commonly call it on EVERY page load once consent
+// exists; pushStep's same-url dedupe would then replace the last step and
+// move its ts, skewing the server-computed durations. So a repeat call on a
+// page that is already the trail's last step must record nothing. Fresh
+// module graph per case (capture.js reads window.__cafConfig and runs init()
+// at load; journey.js shares the same visitor.js consent state).
+describe('consentGranted() starts the journey trail once per page (0.1.18)', () => {
+  const JOURNEY_KEY = '_caf_journey';
+
+  beforeEach(() => {
+    vi.resetModules();
+    localStorage.clear();
+    delete window.__cafConsent;
+    window.__cafConfig = { siteId: 'site-1', requireConsent: true };
+  });
+
+  afterEach(() => {
+    window.caf?.submitted();
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+    localStorage.clear();
+    delete window.__cafConsent;
+    delete (window as unknown as { __cafConfig?: unknown }).__cafConfig;
+    vi.resetModules();
+  });
+
+  it('records exactly one step for the current page on the first call and leaves the step (and its ts) untouched on a repeat call', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-16T10:00:00Z'));
+    await import('./capture.js');
+    const journey = await import('./journey.js');
+    expect(journey.readTrail()).toHaveLength(0); // no consent yet
+
+    window.caf!.consentGranted();
+    const afterFirst = journey.readTrail();
+    expect(afterFirst).toHaveLength(1);
+    expect(afterFirst[0]!.url).toBe(location.pathname);
+    const firstTs = afterFirst[0]!.ts;
+
+    vi.setSystemTime(new Date('2026-10-16T10:05:00Z'));
+    window.caf!.consentGranted(); // banner re-fires on the same page
+
+    const afterSecond = journey.readTrail();
+    expect(afterSecond).toHaveLength(1);
+    expect(afterSecond[0]!.ts).toBe(firstTs);
+    expect(localStorage.getItem(JOURNEY_KEY)).not.toBeNull();
   });
 });

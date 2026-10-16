@@ -47,3 +47,13 @@ export type { RecoverySweepDeps } from './recovery/sweep.js';
 export { sendRecoveryEmail } from './notify.js';
 export type { RecoveryEmailData } from './notify.js';
 export { signUnsubscribeToken, resolveRecoverySecret } from './recovery/unsubscribe-token.js';
+
+/**
+ * Deferred abandoned-lead alert sweep (0.1.18), for the same reason as
+ * `runRecoverySweep` above: the real sweep (`maybeRunAbandonAlertSweep`,
+ * middleware) is gated per process and waits a real 15 minutes, so the
+ * playground's DEV-only `/api/debug-recovery?action=abandon-alert-sweep`
+ * calls this ungated orchestrator with `now` advanced past the delay, while
+ * the real email and webhook paths still run.
+ */
+export { runAbandonAlertSweep, DEFAULT_ABANDON_ALERT_DELAY_MINS } from './recovery/abandon-alerts.js';

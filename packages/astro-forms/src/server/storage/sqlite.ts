@@ -14,7 +14,15 @@
  */
 import type Database from 'better-sqlite3';
 import { monotonicFactory } from 'ulid';
-import type { StorageAdapter, UpsertAbandonedResult } from './adapter.js';
+import {
+  abandonedDraftFields,
+  alertAfterDedupeUpdate,
+  DUE_ABANDON_ALERTS_SQL,
+  type AbandonAlertSchedule,
+  type DueAbandonAlert,
+  type StorageAdapter,
+  type UpsertAbandonedResult,
+} from './adapter.js';
 import type {
   AnalyticsFilter,
   DropOffRow,
@@ -32,7 +40,7 @@ import type {
 import { PAYMENT_REQUEST_FORM_ID } from '../payment-constants.js';
 import { csvCell } from './csv.js';
 import { getDb } from './db.js';
-import { logError } from '../log.js';
+import { logError, warn } from '../log.js';
 
 const ulid = monotonicFactory();
 
@@ -52,6 +60,10 @@ interface RawEntryRow {
   last_field: string | null;
   recovery_sent_at: number | null;
   consent_at: number | null;
+  // 0.1.18 (migration v7): deferred abandoned-lead alert. Kept off `Entry`;
+  // only findDueAbandonAlerts reads them.
+  abandon_notify_due_at: number | null;
+  abandon_notified_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -71,6 +83,8 @@ type NewEntryInput = {
   lastField?: string;
   consentAt?: number;
   recoverySentAt?: number;
+  /** 0.1.18: the deferred abandoned-lead alert's due time (upsertAbandoned's create branch only). */
+  abandonNotifyDueAt?: number;
 };
 
 /**
@@ -305,8 +319,8 @@ export class SqliteStorage implements StorageAdapter {
     const id = ulid();
     this.db
       .prepare(
-        `INSERT INTO entries (id, site_id, form_id, status, fields, visitor_uuid, ip, user_agent, geo, journey, page_url, referrer, last_field, recovery_sent_at, consent_at, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO entries (id, site_id, form_id, status, fields, visitor_uuid, ip, user_agent, geo, journey, page_url, referrer, last_field, recovery_sent_at, consent_at, abandon_notify_due_at, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       .run(
         id,
@@ -324,6 +338,7 @@ export class SqliteStorage implements StorageAdapter {
         input.lastField ?? null,
         input.recoverySentAt ?? null,
         input.consentAt ?? null,
+        input.abandonNotifyDueAt ?? null,
         now,
         now,
       );
@@ -521,11 +536,13 @@ export class SqliteStorage implements StorageAdapter {
   /**
    * Atomic dedupe (T-01-34): SELECT + INSERT/UPDATE run inside ONE
    * `db.transaction(...).immediate()` (BEGIN IMMEDIATE), keyed
-   * site_id + visitor_uuid + form_id throughout.
+   * site_id + visitor_uuid + form_id throughout. The 0.1.18 alert schedule
+   * rides the same transaction (see the adapter docstring).
    */
   async upsertAbandoned(
     input: Omit<Entry, 'id' | 'createdAt' | 'updatedAt' | 'status'>,
     windowMins: number,
+    alert?: AbandonAlertSchedule,
   ): Promise<UpsertAbandonedResult> {
     const txn = this.db
       .transaction(
@@ -559,13 +576,23 @@ export class SqliteStorage implements StorageAdapter {
           const now = Date.now();
 
           if (existingAbandoned) {
+            const schedule = alertAfterDedupeUpdate(
+              {
+                dueAt: existingAbandoned.abandon_notify_due_at,
+                notifiedAt: existingAbandoned.abandon_notified_at,
+                createdAt: existingAbandoned.created_at,
+              },
+              alert,
+            );
             this.db
               .prepare(
-                `UPDATE entries SET fields=?, ip=?, user_agent=?, geo=?, journey=?, page_url=?, referrer=?, last_field=?, updated_at=?
+                `UPDATE entries SET fields=?, ip=?, user_agent=?, geo=?, journey=?, page_url=?, referrer=?, last_field=?, updated_at=?,
+                   abandon_notify_due_at=?, abandon_notified_at=?
                  WHERE id=?`,
               )
               .run(
-                JSON.stringify(txnInput.fields ?? {}),
+                // 0.1.18: the stored row's Turnstile flag survives the update (abandonedDraftFields).
+                JSON.stringify(abandonedDraftFields(txnInput.fields, existingAbandoned.fields)),
                 txnInput.ip ?? null,
                 txnInput.userAgent ?? null,
                 txnInput.geo !== undefined ? JSON.stringify(txnInput.geo) : null,
@@ -574,12 +601,17 @@ export class SqliteStorage implements StorageAdapter {
                 txnInput.referrer ?? null,
                 txnInput.lastField ?? null,
                 now,
+                schedule.dueAt,
+                schedule.notifiedAt,
                 existingAbandoned.id,
               );
             return { outcome: 'updated', entry: mapRowOrThrow(this.getRawById(existingAbandoned.id)) };
           }
 
-          const id = this.insertEntryRow({ ...txnInput, status: 'abandoned' }, now);
+          const id = this.insertEntryRow(
+            { ...txnInput, fields: abandonedDraftFields(txnInput.fields), status: 'abandoned', abandonNotifyDueAt: alert?.dueAt },
+            now,
+          );
           return { outcome: 'created', entry: mapRowOrThrow(this.getRawById(id)) };
         },
       );
@@ -606,9 +638,10 @@ export class SqliteStorage implements StorageAdapter {
           const cutoff = Date.now() - txnLookbackMs;
           const now = Date.now();
 
+          // 0.1.18: clearing the due time cancels the pending abandoned-lead alert.
           const result = this.db
             .prepare(
-              `UPDATE entries SET status='converted', updated_at=?
+              `UPDATE entries SET status='converted', updated_at=?, abandon_notify_due_at=NULL
                WHERE site_id = ? AND visitor_uuid = ? AND form_id = ? AND status = 'abandoned' AND updated_at >= ?`,
             )
             .run(now, txnInput.siteId, txnInput.visitorUuid, txnInput.formId, cutoff);
@@ -928,6 +961,55 @@ export class SqliteStorage implements StorageAdapter {
       return true;
     });
     return txn.immediate(entryId, now);
+  }
+
+  // -------------------------------------------------------------------------
+  // Deferred abandoned-lead alert (0.1.18, migration v7).
+  // -------------------------------------------------------------------------
+
+  /**
+   * Due alerts: clean drafts, then Turnstile-flagged ones, each oldest due
+   * first, off the pending-alert index (DUE_ABANDON_ALERTS_SQL). A row the
+   * mapper cannot read is retired and the listing re-run (adapter
+   * docstring). Every re-run follows a retirement, and a retired row is not
+   * listed again in this pass (only a dedupe update re-arms it, with a
+   * future due time), so the loop ends.
+   */
+  async findDueAbandonAlerts(now: number, limit: number): Promise<DueAbandonAlert[]> {
+    const list = this.db.prepare(DUE_ABANDON_ALERTS_SQL);
+    const retire = this.db.prepare('UPDATE entries SET abandon_notify_due_at = NULL WHERE id = ?');
+    for (;;) {
+      const rows = list.all(now, limit) as RawEntryRow[];
+      const alerts: DueAbandonAlert[] = [];
+      let retired = false;
+      for (const row of rows) {
+        const entry = mapRow(row);
+        if (entry) {
+          alerts.push({ entry, alertedBefore: row.abandon_notified_at !== null });
+          continue;
+        }
+        retire.run(row.id);
+        warn('abandon-alert.corrupt-row-retired', { id: row.id });
+        retired = true;
+      }
+      if (!retired || rows.length < limit) return alerts;
+    }
+  }
+
+  /**
+   * Exactly-once claim: one conditional UPDATE, atomic on its own, so two
+   * sweeps (or two processes on one file) cannot both match the row. The
+   * `status` and due-time conditions mean a converted draft or an early
+   * clock can never claim.
+   */
+  async claimAbandonAlert(entryId: string, now: number): Promise<boolean> {
+    const result = this.db
+      .prepare(
+        `UPDATE entries SET abandon_notify_due_at = NULL, abandon_notified_at = ?
+         WHERE id = ? AND status = 'abandoned' AND abandon_notify_due_at IS NOT NULL AND abandon_notify_due_at <= ?`,
+      )
+      .run(now, entryId, now);
+    return result.changes === 1;
   }
 
   /** Idempotent one-click unsubscribe target (D4) — INSERT OR IGNORE keyed by visitor_uuid. */

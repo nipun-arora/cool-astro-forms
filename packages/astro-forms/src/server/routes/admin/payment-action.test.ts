@@ -241,7 +241,7 @@ describe('POST /forms-admin/payments/action', () => {
       totalCents: 20000,
       currency: 'usd',
       entryId: 'e1',
-      returnUrl: 'https://example.com/',
+      returnUrl: 'https://example.com/forms-pay/paypal-return',
       cancelUrl: 'https://example.com/',
     });
     expect(attachPaymentMock).toHaveBeenCalledWith(
@@ -308,8 +308,27 @@ describe('POST /forms-admin/payments/action', () => {
     await callPost({ entryId: 'e1', provider: 'paypal', amount: '200' });
 
     expect(createOrderMock).toHaveBeenCalledWith(
-      expect.objectContaining({ returnUrl: 'https://example.com/', cancelUrl: 'https://example.com/' }),
+      expect.objectContaining({
+        returnUrl: 'https://example.com/forms-pay/paypal-return/',
+        cancelUrl: 'https://example.com/',
+      }),
     );
+  });
+
+  // 0.1.18: an approved PayPal order moves no money until something captures
+  // it, and only /forms-pay/paypal-return does (handlePaypalReturn). Up to
+  // 0.1.17 the admin quote sent the payer back to the site root, so an
+  // owner-quoted PayPal payment was approved and never captured. The route
+  // is injected under the same PayPal env gate as this branch
+  // (integration.ts `paypalActive` / paypal.ts `paypalConfigured`).
+  it('sends the PayPal payer back to the capturing return page, not the site root (0.1.18)', async () => {
+    getEntryByIdMock.mockResolvedValueOnce(makeEntry());
+
+    await callPost({ entryId: 'e1', provider: 'paypal', amount: '200' });
+
+    const [input] = createOrderMock.mock.calls[0]! as unknown as [{ returnUrl: string; cancelUrl: string }];
+    expect(new URL(input.returnUrl).pathname).toBe('/forms-pay/paypal-return');
+    expect(input.returnUrl).not.toBe(input.cancelUrl);
   });
 
   // 0.1.15: the currency comes from payments.quoteCurrency (it was a

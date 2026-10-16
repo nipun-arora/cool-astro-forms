@@ -26,6 +26,8 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │        │                              + 0.1.14: Cache-Control: no-store, private + X-Content-Type-Options: nosniff on EVERY
 │        │                                /forms-admin/* response (exempt login/auth, guard redirects, errors, exports)
 │        │                              + Phase 4: maybeRunRecoverySweep (fire-and-forget, self-gated, every request)
+│        │                              + 0.1.18: maybeRunAbandonAlertSweep (same fire-and-forget chain, self-gated
+│        │                                once a minute per process, NOT gated on recovery.enabled)
 │        └─ vite plugin: virtual:cool-astro-forms/config = resolved config + trailingSlash (+ templatesModule import)
 │
 ├─ CLIENT (zero-dep, gzip budget 5120B asserted in tests: capture.js + journey.js transitive closure)
@@ -72,6 +74,9 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │         verifyToken seam (Turnstile soft-log → _turnstile:'failed' flag persisted) →
 │         fire-and-forget notify + entry.abandoned webhook, both from the STRIPPED fields
 │         (create-only unless notifyOnUpdate) + purgeExpired (hourly, .catch) →
+│         (0.1.18: notify + webhook are DEFERRED when abandonment.alertDelayMins > 0 (default 15) AND the
+│          adapter implements findDueAbandonAlerts + claimAbandonAlert: upsertAbandoned stores the due time in
+│          the same transaction and recovery/abandon-alerts.ts sends both later; otherwise they fire here)
 │         { saved, reason } + per-branch structured logs
 │    record-submission.ts — NEVER-throws host hook: reads/strips fields._caf envelope (and strips captcha
 │         response fields), cookie visitorUuid,
@@ -118,6 +123,11 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │         workers, a timer-based schedule would be silently dropped) · unsubscribe-token.ts (D4 one-click
 │         HMAC token over the visitor UUID ONLY, never the email — reuses the ONE hmacHex/tokensMatch
 │         convention, webhooks/sign.ts's scheme, not a second signing scheme)
+│         · abandon-alerts.ts (0.1.18) — the owner's DEFERRED abandoned-lead alert: `runAbandonAlertSweep`
+│         (findDueAbandonAlerts → claimAbandonAlert BEFORE the send → entry.abandoned webhook on a first alert
+│         only → notify the draft as stored now) and `maybeRunAbandonAlertSweep` (per-process gate,
+│         ABANDON_ALERT_SWEEP_INTERVAL_MS = 1 min; deliberately not `setTimeout`, and unlike the recovery sweep
+│         never gated on recovery.enabled)
 │    scripts/get-drive-token.mjs (Phase 4, dev-time only, never imported by any server route) — one-time
 │         OAuth loopback-redirect consent CLI (OOB flow is dead since Jan 2023); prints the D6
 │         Testing→Production 7-day-silent-expiry warning + the drive.file hand-created-folder pitfall
@@ -127,7 +137,9 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │         exportCsv(formula-injection-escaped by the one shared storage/csv.ts csvCell, OWASP set)/purgeVisitor(cascades, Phase 4: EXCLUDES recovery_suppressions —
 │         D4a)/purgeExpired/recordFormStart/getFunnel/getTopDropOff (Phase 3 adds payment CRUD +
 │         appendPaymentEventIfAbsent; Phase 4 adds getFilesByEntry/findRecoverableEntries/markConsent/
-│         markRecoverySent(atomic claim)/suppressRecovery/isRecoverySuppressed)
+│         markRecoverySent(atomic claim)/suppressRecovery/isRecoverySuppressed; 0.1.18 adds the OPTIONAL
+│         findDueAbandonAlerts/claimAbandonAlert + an `alert` schedule arg on upsertAbandoned, so a custom
+│         adapter written against 0.1.17 still type-checks and keeps the immediate alert)
 │         SqliteStorage: WAL + busy_timeout, BEGIN IMMEDIATE transactions, prepared statements only,
 │         additive-only user_version migrations (0.1.17: SQLite and Turso apply each block + its user_version bump in
 │         ONE transaction, skip an ADD COLUMN a crashed run already applied, and two concurrent runners both finish
@@ -140,6 +152,11 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │         amount_cents, currency, status CHECK, pay_link_url, provider_ids/events JSON; Phase 3: provider_ref idx;
 │         0.1.17 v6 migration, additive: nullable customer_ref (Stripe cus_…) + payer_email, written by the Stripe
 │         webhook in the same atomic patch as the paid flip)
+│         · 0.1.18 v7 migration, additive, on entries: nullable abandon_notify_due_at (alert pending when set) +
+│         abandon_notified_at (last alert sent) and the partial index idx_entries_abandon_notify (only pending
+│         rows indexed). NULL in both = nothing pending, so existing drafts are never alerted by the upgrade;
+│         convertAndCreateSubmitted clears the due time (cancels the alert) and claimAbandonAlert is ONE
+│         conditional UPDATE (clears the due time, stamps abandon_notified_at) for exactly-once sends
 │         · files (Phase 4: real upload records — filename/sizeBytes/mime/storage[drive|email-only]/
 │         driveFileId/driveLink, populated by attachFiles from recordSubmission's Drive outcome) ·
 │         form_starts (unique visitor+form+site) · recovery_suppressions (Phase 4, v4 — visitor_uuid +
@@ -168,7 +185,7 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 
 ## Config surface (zod, `config.ts`)
 
-`siteId`* · `siteUrl`* (z.url) · `forms{ id: { abandonment{ require: 'email-or-phone'|'always', dedupeWindowMins=60, notifyOnUpdate=false }, notifyTo, recovery?{ enabled? } (04-10, optional per-form override — ABSENT inherits the site-wide switch) } }` · `requireConsent=false` · `journeyParams=false` · `retentionDays=90` · `dbPath` (also CAF_DB_PATH) · `geo{ enabled, provider template, timeoutMs }` · `admin{ sessionTtlDays=7 }` · capture allow/deny lists · `templatesModule` (path, imported via virtual module) · Phase 3: `payments{ payLinkFees[{label, percent|flatCents}], feePresets?{key: FeeLine[]}, feeOverrides='off'|'query' (0.1.12, D3 selector opt-in), requestPage{ minAmountCents, maxAmountCents, allowedCurrencies=['usd'], feeLabel? }, quoteCurrency='usd' (0.1.15, two-decimal only), adminQuote='builtin'|'off'|{ href } (0.1.15) }`, `webhooks{ urls, secret }` · Phase 4: `drive{ linkAccess='private'|'anyone', rootFolderName='cool-astro-forms', attachmentFallbackMaxBytes=10485760 }`, `recovery{ enabled=false, delayMins=60, consentMode='auto'|'checkbox' }` (site-wide switch, unchanged by 04-10).
+`siteId`* · `siteUrl`* (z.url) · `forms{ id: { abandonment{ require: 'email-or-phone'|'always', dedupeWindowMins=60, notifyOnUpdate=false, alertDelayMins? (0.1.18; absent = 15, 0 = immediate) }, notifyTo, recovery?{ enabled? } (04-10, optional per-form override — ABSENT inherits the site-wide switch) } }` · `requireConsent=false` · `journeyParams=false` · `retentionDays=90` · `dbPath` (also CAF_DB_PATH) · `geo{ enabled, provider template, timeoutMs }` · `admin{ sessionTtlDays=7 }` · capture allow/deny lists · `templatesModule` (path, imported via virtual module) · Phase 3: `payments{ payLinkFees[{label, percent|flatCents}], feePresets?{key: FeeLine[]}, feeOverrides='off'|'query' (0.1.12, D3 selector opt-in), requestPage{ minAmountCents, maxAmountCents, allowedCurrencies=['usd'], feeLabel? }, quoteCurrency='usd' (0.1.15, two-decimal only), adminQuote='builtin'|'off'|{ href } (0.1.15), notifyTo? (0.1.18; owner address for the "payment received" email when the payment's entry belongs to no configured form), payerReceipts? 'always'|'dashboard' (0.1.18; absent = 'always') }`, `webhooks{ urls, secret }` · Phase 4: `drive{ linkAccess='private'|'anyone', rootFolderName='cool-astro-forms', attachmentFallbackMaxBytes=10485760 }`, `recovery{ enabled=false, delayMins=60, consentMode='auto'|'checkbox' }` (site-wide switch, unchanged by 04-10).
 Env: `EMAIL_*` (SMTP; 0.1.15 adds `EMAIL_AUTH=ip` relay mode, `EMAIL_FROM`, `EMAIL_FROM_NAME`, plus the middleware-bridged `CAF_SITE_URL` for the From-domain check), `FORMS_ADMIN_PASSWORD`, `CANARY_TOKEN`, `TURNSTILE_SITE_KEY/SECRET_KEY`, `CAF_DB_PATH`, `CAF_GEO_*`, Phase 3 `STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET/PAYPAL_CLIENT_ID/PAYPAL_CLIENT_SECRET/PAYPAL_ENV/CAF_WEBHOOK_SECRET`, Phase 4 `GOOGLE_DRIVE_CLIENT_ID/GOOGLE_DRIVE_CLIENT_SECRET/GOOGLE_DRIVE_REFRESH_TOKEN` (all three-or-none — `driveConfigured()` gate) + the middleware-bridged `CAF_DRIVE_LINK_ACCESS/CAF_DRIVE_ROOT_FOLDER/CAF_DRIVE_FALLBACK_MAX_BYTES` (W1 contract, not host-set directly) + test-only `GOOGLE_DRIVE_API_BASE_URL/GOOGLE_OAUTH_TOKEN_URL` (mock e2e seam, generalizes `STRIPE_API_BASE_URL`).
 
 ## Test architecture
@@ -196,3 +213,17 @@ Shipped against live production findings on the second consumer, one release per
 - **Payment transports**: create-session is dual-dialect — `200 {ok:true,url}` for `Accept: application/json`, `302 Location` for navigations. The pay page submits over fetch and hops to checkout as a plain GET; native submit is the no-JS fallback. Edge bot-challenges structurally cannot complete on navigation POSTs; this transport is immune (docs/payments.md 3b).
 - **Host deployment contracts hardened**: proxy-fronted hosts need `security.allowedDomains` (Astro only trusts X-Forwarded-Proto when it is non-empty; without it every urlencoded POST dies in Astro's CSRF origin check) — README quickstart + how-it-works carry the snippet; git-deploy hosts rebuild the app dir per release, so `dbPath` must point OUTSIDE the deploy directory (serverless.md; the package mkdirs the target and the admin-secret file follows `dbPath`).
 - **templatesModule proven in production**: a host module default-exporting `{abandonedLead: NotifyTemplateFn}` fully rebrands the abandoned-lead email; the seam resolves via the emitted virtual config module with a project-root-absolute specifier.
+
+## 0.1.18 addendum (staged, not committed, not published)
+
+Architectural deltas over the text above:
+
+- **Deferred abandoned-lead alert.** Migration v7 (`entries.abandon_notify_due_at`, `entries.abandon_notified_at`, partial index) plus `recovery/abandon-alerts.ts`. The abandon save stores a due time (`alertDelayMins` after the first abandon; a `notifyOnUpdate` update may re-arm one more alert only when none is pending); `convertAndCreateSubmitted` clears it; a request-driven sweep (middleware, once a minute per process, independent of `recovery.enabled`) claims each due draft with one conditional UPDATE before sending the email and, for a first alert, the `entry.abandoned` webhook. A pass drains up to 8 batches or 5 s. `DUE_ABANDON_ALERTS_SQL` (`storage/adapter.ts`, shared by SQLite and Turso) lists Turnstile-flagged drafts after clean ones and uses `+status` so the planner takes the pending-alert partial index. Claim-before-send means a crash between the two drops that alert rather than duplicating it. The two adapter methods are optional; without both, `handle-abandon.ts` alerts on the save as before. Both built-in adapters (SQLite, Turso) implement them.
+- **One resolver for the "payment received" address.** `webhooks/payment-notify.ts` (`resolvePaymentNotifyTo`, `createPaymentReceivedNotifier`) is shared by the Stripe and PayPal webhook routes: the payment entry's own form, then `payments.notifyTo`, then the first configured form; when none resolves it logs `payment.notify-skipped` instead of silently returning. `handle-inbound.ts` stays config-free.
+- **PayPal capture on return.** `payments/paypal.ts` gains `captureOrder`; `payments/paypal-return.ts` (`handlePaypalReturn`, framework-free) captures only a token that matches a stored PayPal payment in `link_created`; `pay/paypal-return.astro` renders the outcome. The page writes nothing: the verified `PAYMENT.CAPTURE.COMPLETED` webhook stays the sole writer of `paid`. Admin-quote orders (`routes/admin/payment-action.ts`) now use the same return URL.
+- **Stripe `receipt_email`.** Checkout Sessions (`payments/stripe.ts`, `payments/checkout-for-entry.ts`) set `payment_intent_data.receipt_email` from the normalized payer email when one is known; Payment Links cannot. `payments.payerReceipts: 'always' | 'dashboard'` (absent = `'always'`, applied in `payment-request.ts`) turns that off for `'dashboard'`; `createCheckoutForEntry` takes the same value as an input because it does not read the integration config.
+- **Payment label cleaning.** `payments/label.ts` (`cleanPaymentLabel`: control characters removed, whitespace collapsed, trimmed, at most 100 characters) cleans the `/forms-pay` `label` (also in `pay/pay.astro`) and `createCheckoutForEntry`'s `productName` before they reach Stripe or an entry memo.
+- **PayPal `user_action: 'PAY_NOW'`.** `createOrder` declares it in `application_context`, so the button reads "Pay Now", matching capture-on-return.
+- **Turso adapter cache.** `getStorageAdapter` (`storage/index.ts`) keeps one `TursoStorage` per (URL, token) per process and drops it when its `ready` promise rejects; `TursoStorage` handles a failed connect itself, so it never raises an unhandled rejection.
+- **Admin pages go through `getStorageAdapter(config)`.** The Entries, Abandoned, Payments, Analytics and entry-detail pages no longer construct `SqliteStorage` directly, so `storage.kind: 'turso'` is honoured on reads as well as writes.
+- **Journey trail honours `requireConsent`.** `client/journey.ts` records nothing (and clears a pre-consent trail) until the same `hasConsent` gate `capture.ts` uses passes; `consentGranted()` starts the trail on the current page.

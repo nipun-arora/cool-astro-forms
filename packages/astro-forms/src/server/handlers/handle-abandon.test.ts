@@ -452,6 +452,109 @@ describe('handleAbandon — dedupe + notify', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Deferred abandoned-lead alert (0.1.18). The abandon beacon also fires on a
+// mere tab switch, so with the built-in adapters (which implement the alert
+// methods) the save no longer emails or fires entry.abandoned: it stores a
+// due time, and the sweep (abandon-alerts.ts) sends both later unless a
+// submission promoted the draft first. The cases above run against a fake
+// adapter WITHOUT those methods, which is exactly the custom-adapter fallback:
+// immediate alerts, as before, so an alert is never silently lost.
+// ---------------------------------------------------------------------------
+
+describe('handleAbandon — deferred abandoned-lead alert (0.1.18)', () => {
+  const NOW = 50_000_000;
+
+  function alertStorage(outcome: UpsertAbandonedResult['outcome'] = 'created') {
+    const upsertAbandoned = vi.fn(
+      async (_input: unknown, _windowMins: number, _alert?: unknown): Promise<UpsertAbandonedResult> =>
+        outcome === 'already-converted' ? { outcome } : { outcome, entry: makeEntry() },
+    );
+    const storage = makeFakeStorage({
+      upsertAbandoned: upsertAbandoned as never,
+      findDueAbandonAlerts: vi.fn(async () => []),
+      claimAbandonAlert: vi.fn(async () => true),
+    });
+    return { storage, upsertAbandoned };
+  }
+
+  it('by default saves the draft but sends no alert and no webhook yet; the due time is the first abandon + 15 minutes', async () => {
+    const { storage, upsertAbandoned } = alertStorage();
+    const notify = vi.fn(async () => ({}));
+    const deliverWebhook = vi.fn();
+    const result = await handleAbandon(makeInput({}), makeDeps({ storage, notify, deliverWebhook, now: () => NOW }));
+
+    expect(JSON.parse(result.body)).toEqual({ saved: true, deduped: false });
+    expect(upsertAbandoned.mock.calls[0]![2]).toEqual({ dueAt: NOW + 15 * 60_000, rearmOnUpdate: false });
+    expect(notify).not.toHaveBeenCalled();
+    expect(deliverWebhook).not.toHaveBeenCalled();
+  });
+
+  it('honors a per-form abandonment.alertDelayMins', async () => {
+    const { storage, upsertAbandoned } = alertStorage();
+    await handleAbandon(
+      makeInput({}),
+      makeDeps({ config: makeConfig({ alertDelayMins: 30 }), storage, now: () => NOW }),
+    );
+    expect(upsertAbandoned.mock.calls[0]![2]).toEqual({ dueAt: NOW + 30 * 60_000, rearmOnUpdate: false });
+  });
+
+  it('notifyOnUpdate: a dedupe update asks storage to re-arm (one pending alert at a time) instead of emailing now', async () => {
+    const { storage, upsertAbandoned } = alertStorage('updated');
+    const notify = vi.fn(async () => ({}));
+    const result = await handleAbandon(
+      makeInput({}),
+      makeDeps({ config: makeConfig({ notifyOnUpdate: true }), storage, notify, now: () => NOW }),
+    );
+    expect(JSON.parse(result.body)).toEqual({ saved: true, deduped: true });
+    expect(upsertAbandoned.mock.calls[0]![2]).toEqual({ dueAt: NOW + 15 * 60_000, rearmOnUpdate: true });
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('alertDelayMins: 0 keeps the pre-0.1.18 immediate alert and webhook, and schedules nothing', async () => {
+    const { storage, upsertAbandoned } = alertStorage();
+    const notify = vi.fn(async () => ({}));
+    const deliverWebhook = vi.fn();
+    await handleAbandon(
+      makeInput({}),
+      makeDeps({ config: makeConfig({ alertDelayMins: 0 }), storage, notify, deliverWebhook, now: () => NOW }),
+    );
+    expect(upsertAbandoned.mock.calls[0]![2]).toBeUndefined();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(deliverWebhook).toHaveBeenCalledWith('entry.abandoned', expect.objectContaining({ id: 'entry-1' }));
+  });
+
+  it('a custom adapter without the alert methods keeps immediate alerts (never schedules what nothing would send)', async () => {
+    const upsertAbandoned = vi.fn(
+      async (_input: unknown, _windowMins: number, _alert?: unknown): Promise<UpsertAbandonedResult> => ({
+        outcome: 'created',
+        entry: makeEntry(),
+      }),
+    );
+    const notify = vi.fn(async () => ({}));
+    await handleAbandon(
+      makeInput({}),
+      makeDeps({ storage: makeFakeStorage({ upsertAbandoned: upsertAbandoned as never }), notify, now: () => NOW }),
+    );
+    expect(upsertAbandoned.mock.calls[0]![2]).toBeUndefined();
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed Turnstile check still saves and flags the draft, and defers the alert like any other draft (soft-fail unchanged)', async () => {
+    const { storage } = alertStorage();
+    const updateEntry = vi.fn(async (_id: string, patch: Partial<Entry>) => makeEntry(patch));
+    storage.updateEntry = updateEntry as never;
+    const notify = vi.fn(async () => ({}));
+    const result = await handleAbandon(
+      makeInput({}),
+      makeDeps({ storage, notify, verifyToken: vi.fn(async () => ({ ok: false })), now: () => NOW }),
+    );
+    expect(JSON.parse(result.body)).toEqual({ saved: true, deduped: false });
+    expect(updateEntry.mock.calls[0]![1].fields).toMatchObject({ _turnstile: 'failed' });
+    expect(notify).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Storage failure
 // ---------------------------------------------------------------------------
 

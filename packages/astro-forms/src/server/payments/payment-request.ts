@@ -46,6 +46,7 @@ import type { RateLimiter } from '../security/rate-limit.js';
 import { isSameOrigin } from '../security/origin-check.js';
 import { withinSizeCap } from '../security/size-cap.js';
 import type { StorageAdapter } from '../storage/adapter.js';
+import { cleanPaymentLabel } from './label.js';
 import { computeBreakdown, parseAmountParam, resolveFeeLines, validatePaymentRequest } from './pricing.js';
 
 export type PaymentRequestRejectReason =
@@ -97,6 +98,8 @@ export interface CreateCheckoutSessionDepInput {
   /** Payer email — lets Stripe find-or-create a Customer so repeat payers are attributed. */
   customerEmail?: string;
   customerName?: string;
+  /** `config.payments.payerReceipts`, absent read as `'always'` (0.1.18): whether `customerEmail` also becomes the session's `receipt_email`. */
+  payerReceipts: 'always' | 'dashboard';
 }
 
 export interface CreateCheckoutSessionDepResult {
@@ -336,7 +339,12 @@ export async function handlePaymentRequest(
     deps.config.siteUrl + adminUrl('/forms-pay', trailingSlash) + '?amount=' + centsToDollarsString(amountCents);
   const returnUrl = deps.config.siteUrl + adminUrl('/forms-pay/paypal-return', trailingSlash);
 
-  const memo = params.get('label') ?? undefined;
+  // 0.1.18: the label is free text (the pay link's or whatever is posted)
+  // and becomes the Stripe line item name, the PaymentIntent description and
+  // the entry memo: control characters removed, whitespace collapsed, at most
+  // 100 characters (label.ts). Nothing left means no memo, and Stripe's line
+  // item reads "Payment".
+  const memo = cleanPaymentLabel(params.get('label'));
 
   try {
     const entry = await deps.storage.createEntry({
@@ -391,6 +399,9 @@ export async function handlePaymentRequest(
       cancelUrl,
       customerEmail,
       customerName,
+      // 0.1.18: 'dashboard' leaves the payer receipt to the Stripe dashboard
+      // setting instead of forcing one through receipt_email (stripe.ts).
+      payerReceipts: deps.config.payments.payerReceipts ?? 'always',
     });
     await deps.storage.attachPayment(entry.id, {
       provider: 'stripe',
