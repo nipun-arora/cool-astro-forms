@@ -118,6 +118,27 @@ export interface HandleInboundPaymentInput {
    * logged. Absent = the 0.1.14 behaviour (PayPal today).
    */
   settlement?: PaymentSettlement;
+  /**
+   * Stripe Customer id (`cus_…`) of the verified session (0.1.17). Written
+   * onto the payment row only when this very call marks it paid, inside the
+   * same atomic patch as the status flip; ignored for an unpaid or
+   * mismatched session, a non-completed event, and a duplicate delivery.
+   * Null/absent for a guest checkout. Never logged.
+   */
+  customerRef?: string | null;
+  /**
+   * The payer's email from the verified session, already trimmed and
+   * lowercased by the route (0.1.17). Same write rules as `customerRef`.
+   * Payer-controlled and personal data: never logged.
+   */
+  payerEmail?: string | null;
+  /**
+   * The provider event's own live/test flag (Stripe `event.livemode`, 0.1.17).
+   * Stamped on the appended event record, so the admin can link the test or
+   * live Stripe dashboard for a row whose `providerRef` is a `plink_…`.
+   * No schema change: events[] entries already accept extra keys.
+   */
+  livemode?: boolean;
 }
 
 /**
@@ -162,6 +183,15 @@ export interface HandleInboundPaymentDeps {
 
 export interface HandleInboundPaymentResult {
   status: number;
+  /**
+   * True only when THIS call marked the payment row paid (0.1.17): the atomic
+   * append took this event (not a duplicate) together with the paid patch.
+   * False for an unknown ref, a storage failure, a duplicate delivery, a
+   * settlement mismatch and a non-completed event. Lets the Stripe route do
+   * once-per-payment follow-ups (adopting the paying Customer) without a
+   * second read; it changes nothing about `status`.
+   */
+  markedPaid: boolean;
 }
 
 export async function handleInboundPayment(
@@ -178,7 +208,7 @@ export async function handleInboundPayment(
     }
   } catch (err) {
     logError('webhook.lookup-failed', err, { providerRef: input.providerRef, provider: input.provider });
-    return { status: 500 };
+    return { status: 500, markedPaid: false };
   }
 
   if (!payment) {
@@ -191,13 +221,18 @@ export async function handleInboundPayment(
       ...(input.alternateProviderRef ? { alternateProviderRef: input.alternateProviderRef } : {}),
       provider: input.provider,
     });
-    return { status: 200 };
+    return { status: 200, markedPaid: false };
   }
   const paymentId = payment.id;
   const entryId = payment.entryId;
 
   const isCompletedEvent = COMPLETED_EVENT_TYPES.has(input.eventType);
-  const event: PaymentEvent = { id: input.eventId, type: input.eventType, at: now };
+  const event: PaymentEvent = {
+    id: input.eventId,
+    type: input.eventType,
+    at: now,
+    ...(typeof input.livemode === 'boolean' ? { livemode: input.livemode } : {}),
+  };
 
   // 0.1.15: judged BEFORE the atomic append so the paid patch is only ever
   // part of the same transaction when the provider's own facts match the
@@ -206,6 +241,16 @@ export async function handleInboundPayment(
   const verdict: SettlementVerdict =
     isCompletedEvent && input.settlement ? judgeSettlement(payment, input.settlement) : { ok: true };
   const marksPaid = isCompletedEvent && verdict.ok;
+
+  // 0.1.17: the paid patch. The Stripe customer and payer email are part of
+  // THIS patch (never a second update), so they are written atomically with
+  // the flip, only when the row actually becomes paid, and a replayed event
+  // (appended === false below) writes nothing. Absent values are left out of
+  // the patch rather than sent as null, so they can never blank a value that
+  // is already on the row.
+  const paidPatch: Partial<Payment> = { status: 'paid' };
+  if (input.customerRef) paidPatch.customerRef = input.customerRef;
+  if (input.payerEmail) paidPatch.payerEmail = input.payerEmail;
 
   // The checker-W1 atomic primitive: ONE transaction does the duplicate
   // check, the event append, AND the optional paid-status patch. This
@@ -218,18 +263,18 @@ export async function handleInboundPayment(
       paymentId,
       input.eventId,
       event,
-      marksPaid ? { status: 'paid' } : undefined,
+      marksPaid ? paidPatch : undefined,
     );
   } catch (err) {
     logError('webhook.append-event-failed', err, { paymentId, eventId: input.eventId });
-    return { status: 500 };
+    return { status: 500, markedPaid: false };
   }
 
   if (!appended) {
     // Duplicate delivery — the atomic primitive made ZERO writes. ACK,
     // zero further side effects: no re-notify, no re-deliver, no entry flip.
     deps.log('webhook.duplicate-event', { paymentId, eventId: input.eventId });
-    return { status: 200 };
+    return { status: 200, markedPaid: false };
   }
 
   if (!verdict.ok) {
@@ -250,14 +295,14 @@ export async function handleInboundPayment(
         currency: input.settlement?.currency ?? null,
       },
     });
-    return { status: 200 };
+    return { status: 200, markedPaid: false };
   }
 
   if (!isCompletedEvent) {
     // e.g. a refund event — appended above WITHOUT a status patch; no
     // notify, no outbound deliver (only a real paid transition notifies).
     deps.log('webhook.event-appended', { paymentId, eventId: input.eventId, eventType: input.eventType });
-    return { status: 200 };
+    return { status: 200, markedPaid: false };
   }
 
   // Real paid transition. Flip the anchor entry (unless it's already
@@ -297,5 +342,7 @@ export async function handleInboundPayment(
     status: 'paid',
   });
 
-  return { status: 200 };
+  // Reached only when `marksPaid` was true and the atomic append took this
+  // event: this very delivery committed the paid patch.
+  return { status: 200, markedPaid: true };
 }

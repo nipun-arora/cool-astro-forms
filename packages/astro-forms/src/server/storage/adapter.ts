@@ -131,6 +131,11 @@ export interface StorageAdapter {
    * recorded without its accompanying status change (or vice versa).
    * Returns true when the event was newly appended (patch applied), false
    * with ZERO writes when `eventId` was already present.
+   *
+   * 0.1.17: the paid patch also carries `customerRef` / `payerEmail` (the
+   * Stripe Customer and payer email of the session, migration v6). They ride
+   * this same transaction, so a replayed event can neither write them twice
+   * nor overwrite the first delivery's values.
    */
   appendPaymentEventIfAbsent(
     paymentId: string,

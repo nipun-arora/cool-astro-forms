@@ -8,8 +8,14 @@
  * storage failure, an entry that does not exist) is money taken and never
  * matched. Hence: validate and look the entry up BEFORE Stripe is called,
  * write the row with typed keys, and expire the session if the write fails.
+ *
+ * 0.1.17 adds customer attribution: a payer whose earlier payment the
+ * webhook adopted is attributed to that Customer, and a new payer's session
+ * makes Stripe create one at confirmation, so a repeat payer's payments share
+ * one Customer and the dashboard no longer reads "Customers created: 0"
+ * beside real revenue. The package itself never creates or writes one.
  */
-import type Stripe from 'stripe';
+import Stripe from 'stripe';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Entry } from '../../types.js';
 import type { StorageAdapter } from '../storage/adapter.js';
@@ -22,7 +28,56 @@ vi.mock('../log.js', () => ({ log: vi.fn(), logError: vi.fn(), warn: vi.fn() }))
 const NOW = Date.UTC(2026, 9, 3, 8, 0, 0);
 const HOUR = 3_600_000;
 
-function fakeClient(opts: { create?: ReturnType<typeof vi.fn>; expire?: ReturnType<typeof vi.fn> } = {}) {
+interface FakeCustomer {
+  id: string;
+  email: string;
+  created?: number;
+  metadata?: Record<string, string>;
+  paymentMethods?: string[];
+}
+
+/** The tag the webhook writes on a paying Customer (customers.ts), and the only kind checkout reuses. */
+const PKG = { source: 'cool-astro-forms' };
+
+/** A Customer an earlier verified payment by guest@example.com created and the webhook adopted. */
+const adopted = (): FakeCustomer => ({ id: 'cus_adopted', email: 'guest@example.com', created: 1, metadata: PKG });
+
+/**
+ * In-memory Stripe Customers API: `list` matches the email exactly and
+ * ignores metadata (as Stripe does), `search` finds nothing, and
+ * `listPaymentMethods` returns the stored customer's cards. `seed` holds the
+ * Customers that already exist (`store` can gain one between calls, as the
+ * webhook's adoption would). `failList` models a Stripe outage on the lookup
+ * alone: `true` fails every list call, a predicate fails only the calls
+ * (0-based) it returns true for. `create` and `update` are spies: checkout
+ * must never call them.
+ */
+function fakeCustomers(opts: { failList?: boolean | ((call: number) => boolean); seed?: FakeCustomer[] } = {}) {
+  const store: FakeCustomer[] = [...(opts.seed ?? [])];
+  let listCalls = 0;
+  const list = vi.fn(async (params: { email: string }) => {
+    const call = listCalls++;
+    if (opts.failList === true || (typeof opts.failList === 'function' && opts.failList(call))) {
+      throw new Error('stripe unreachable');
+    }
+    return { data: store.filter((c) => c.email === params.email) };
+  });
+  const search = vi.fn(async () => ({ data: [] }));
+  const create = vi.fn();
+  const update = vi.fn();
+  const listPaymentMethods = vi.fn(async (id: string) => ({
+    data: (store.find((c) => c.id === id)?.paymentMethods ?? []).map((pm) => ({ id: pm })),
+  }));
+  return { resource: { list, search, create, update, listPaymentMethods }, list, create, update, store };
+}
+
+function fakeClient(
+  opts: {
+    create?: ReturnType<typeof vi.fn>;
+    expire?: ReturnType<typeof vi.fn>;
+    customers?: ReturnType<typeof fakeCustomers>;
+  } = {},
+) {
   const create =
     opts.create ??
     vi.fn(async (params: { expires_at: number }) => ({
@@ -31,8 +86,9 @@ function fakeClient(opts: { create?: ReturnType<typeof vi.fn>; expire?: ReturnTy
       expires_at: params.expires_at,
     }));
   const expire = opts.expire ?? vi.fn(async (id: string) => ({ id, status: 'expired' }));
-  const client = { checkout: { sessions: { create, expire } } } as unknown as Stripe;
-  return { client, create, expire };
+  const customers = opts.customers ?? fakeCustomers();
+  const client = { checkout: { sessions: { create, expire } }, customers: customers.resource } as unknown as Stripe;
+  return { client, create, expire, customers };
 }
 
 function entry(overrides: Partial<Entry> = {}): Entry {
@@ -111,12 +167,18 @@ describe('createCheckoutForEntry — happy path', () => {
             quantity: 1,
           },
         ],
+        // A first payment: Stripe creates the payer's Customer at confirmation.
+        customer_creation: 'always',
         customer_email: 'guest@example.com',
+        client_reference_id: 'entry-1',
         expires_at: Math.floor((NOW + 23 * HOUR) / 1000),
         success_url: 'https://tours.example/payment/received/',
         cancel_url: 'https://tours.example/payment/cancelled/',
         metadata: { booking_ref: 'REF-1234', entry_id: 'entry-1' },
-        payment_intent_data: { metadata: { booking_ref: 'REF-1234', entry_id: 'entry-1' } },
+        payment_intent_data: {
+          metadata: { booking_ref: 'REF-1234', entry_id: 'entry-1' },
+          description: 'Example Tours booking REF-1234',
+        },
       },
       { idempotencyKey: 'quote-7f3c' },
     );
@@ -166,7 +228,7 @@ describe('createCheckoutForEntry — happy path', () => {
     resetDbCache();
   });
 
-  it('defaults the product name to "Payment" and omits customer_email and extra metadata when not given', async () => {
+  it('defaults the product name and PaymentIntent description to "Payment" and omits extra metadata when not given', async () => {
     const { client, create } = fakeClient();
 
     await createCheckoutForEntry(input({ customerEmail: undefined, metadata: undefined }), {
@@ -181,18 +243,171 @@ describe('createCheckoutForEntry — happy path', () => {
       'Payment',
     );
     expect(params.metadata).toEqual({ entry_id: 'entry-1' });
+    expect(params.payment_intent_data).toEqual({ metadata: { entry_id: 'entry-1' }, description: 'Payment' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.1.17 customer attribution. Through 0.1.16 this function sent only
+// `customer_email`, which Stripe treats as a guest checkout: the dashboard
+// showed "Customers created: 0" beside real revenue, and a repeat payer was
+// never tied to their existing Customer. The first 0.1.17 draft created the
+// Customer itself from the (possibly anonymous) input; now Stripe creates it
+// when the payer confirms, the webhook adopts it after a verified payment,
+// and later payments by that email reuse it.
+// ---------------------------------------------------------------------------
+
+describe('createCheckoutForEntry — customer attribution', () => {
+  const run = (overrides: Partial<CreateCheckoutForEntryInput>, client: Stripe) =>
+    createCheckoutForEntry(input(overrides), { client, storage: fakeStorage(), now: () => NOW });
+
+  it('a first payment by a new email: customer_creation always + the normalized customer_email, and the package creates and updates no Customer', async () => {
+    const { client, create, customers } = fakeClient();
+
+    await run({ customerEmail: 'Guest@Example.COM', customerName: 'Jane Guest' }, client);
+
+    const [params] = create.mock.calls[0] as [Record<string, unknown>];
+    expect(params.customer_creation).toBe('always');
+    expect(params.customer_email).toBe('guest@example.com');
+    expect(params).not.toHaveProperty('customer');
+    expect(customers.create).not.toHaveBeenCalled();
+    expect(customers.update).not.toHaveBeenCalled();
+  });
+
+  it("a payer whose earlier payment was adopted is attributed to that Customer: customer id, card saving off, no customer_email, no customer_creation", async () => {
+    const { client, create, customers } = fakeClient({ customers: fakeCustomers({ seed: [adopted()] }) });
+
+    await run({ customerEmail: 'GUEST@example.com' }, client);
+
+    const [params] = create.mock.calls[0] as [Record<string, unknown>];
+    expect(params.customer).toBe('cus_adopted');
+    expect(params).not.toHaveProperty('customer_email');
+    expect(params).not.toHaveProperty('customer_creation');
+    // Checkout prefills a Customer's saved card for whoever opens the link;
+    // the package's Customers must never be given one.
+    expect(params.saved_payment_method_options).toEqual({ payment_method_save: 'disabled' });
+    expect(params.payment_intent_data).not.toHaveProperty('setup_future_usage');
+    expect(customers.create).not.toHaveBeenCalled();
+    expect(customers.update).not.toHaveBeenCalled();
+  });
+
+  // The cash-balance exclusion stripe.ts sends is for dashboard-managed
+  // payment methods. This session is card-only, so customer_balance (a bank
+  // transfer funded from the Customer's balance) can never be offered here.
+  it("a session for a Customer stays card-only, so the Customer's cash balance can never pay it", async () => {
+    const { client, create } = fakeClient({ customers: fakeCustomers({ seed: [adopted()] }) });
+
+    await run({}, client);
+
+    const [params] = create.mock.calls[0] as [Record<string, unknown>];
+    expect(params.customer).toBe('cus_adopted');
+    expect(params.payment_method_types).toEqual(['card']);
+  });
+
+  it('a Customer that is untagged, or tagged but holding a card, is never put on the session', async () => {
+    for (const seed of [
+      { id: 'cus_legacy', email: 'guest@example.com', created: 1 },
+      { ...adopted(), paymentMethods: ['pm_card'] },
+    ]) {
+      const { client, create } = fakeClient({ customers: fakeCustomers({ seed: [seed] }) });
+
+      await run({}, client);
+
+      const [params] = create.mock.calls[0] as [Record<string, unknown>];
+      expect(params).not.toHaveProperty('customer');
+      expect(params.customer_creation).toBe('always');
+    }
+  });
+
+  it("a repeat payer's checkouts (different keys, different quotes) all land on the adopted Customer", async () => {
+    const { client, create } = fakeClient({ customers: fakeCustomers({ seed: [adopted()] }) });
+
+    await run({ idempotencyKey: 'quote-a' }, client);
+    await run({ idempotencyKey: 'quote-b', customerEmail: 'GUEST@example.com' }, client);
+
+    const customerIds = create.mock.calls.map((call) => (call[0] as { customer?: string }).customer);
+    expect(customerIds).toEqual(['cus_adopted', 'cus_adopted']);
+  });
+
+  it('a customer lookup failure still produces a checkout: customer_creation: always plus customer_email, never both customer fields', async () => {
+    const { client, create } = fakeClient({ customers: fakeCustomers({ failList: true, seed: [adopted()] }) });
+
+    const result = await run({}, client);
+
+    expect(result).toMatchObject({ ok: true, sessionId: 'cs_test_desk_1' });
+    const [params] = create.mock.calls[0] as [Record<string, unknown>];
+    expect(params.customer_creation).toBe('always');
+    expect(params.customer_email).toBe('guest@example.com');
+    expect(params).not.toHaveProperty('customer');
+  });
+
+  it('with no customerEmail there is nothing to look up: customer_creation: always makes Stripe create the Customer', async () => {
+    const { client, create, customers } = fakeClient();
+
+    await run({ customerEmail: undefined }, client);
+
+    const [params] = create.mock.calls[0] as [Record<string, unknown>];
+    expect(params.customer_creation).toBe('always');
+    expect(params).not.toHaveProperty('customer');
+    expect(params).not.toHaveProperty('customer_email');
+    expect(customers.list).not.toHaveBeenCalled();
+  });
+
+  // Stripe answers a reused idempotency key with an error unless the params
+  // match exactly. The lookup is deterministic for an email, so the replayed
+  // create is identical on both paths.
+  it('a replayed request sends IDENTICAL session params, because the same email resolves the same way', async () => {
+    for (const seed of [[], [adopted()]]) {
+      const { client, create } = fakeClient({ customers: fakeCustomers({ seed }) });
+
+      await run({ idempotencyKey: 'quote-replay' }, client);
+      await run({ idempotencyKey: 'quote-replay', customerEmail: 'GUEST@example.com' }, client);
+
+      expect(create.mock.calls[1]![0]).toEqual(create.mock.calls[0]![0]);
+    }
+  });
+
+  it('tags the session with client_reference_id = the entry id, on every path (customer, fallback and no email), so the Stripe dashboard and exports show which entry paid', async () => {
+    const withCustomer = fakeClient({ customers: fakeCustomers({ seed: [adopted()] }) });
+    const fallback = fakeClient({ customers: fakeCustomers({ failList: true }) });
+    const noEmail = fakeClient();
+
+    await run({}, withCustomer.client);
+    await run({}, fallback.client);
+    await run({ customerEmail: undefined }, noEmail.client);
+
+    for (const { create } of [withCustomer, fallback, noEmail]) {
+      expect((create.mock.calls[0]![0] as Record<string, unknown>).client_reference_id).toBe('entry-1');
+    }
+  });
+
+  // The name is caller input that may come from a visitor; Checkout collects
+  // the payer's own name. It is still validated, for API compatibility.
+  it('customerName is accepted but never sent to Stripe, on either path', async () => {
+    for (const seed of [[], [adopted()]]) {
+      const { client, create, customers } = fakeClient({ customers: fakeCustomers({ seed }) });
+
+      const result = await run({ customerName: 'Jane Guest' }, client);
+
+      expect(result.ok).toBe(true);
+      expect(JSON.stringify(create.mock.calls[0]![0])).not.toContain('Jane Guest');
+      expect(customers.create).not.toHaveBeenCalled();
+      expect(customers.update).not.toHaveBeenCalled();
+    }
   });
 });
 
 describe('createCheckoutForEntry — refuses BEFORE calling Stripe', () => {
   it('an unknown entry: entry-not-found, Stripe never called, nothing recorded', async () => {
-    const { client, create } = fakeClient();
+    const { client, create, customers } = fakeClient();
     const storage = fakeStorage();
 
     const result = await createCheckoutForEntry(input({ entryId: 'nope' }), { client, storage, now: () => NOW });
 
     expect(result).toMatchObject({ ok: false, code: 'entry-not-found' });
     expect(create).not.toHaveBeenCalled();
+    // A bogus entry never even looks the email up at Stripe.
+    expect(customers.list).not.toHaveBeenCalled();
     expect(storage.attachPayment).not.toHaveBeenCalled();
   });
 
@@ -235,16 +450,19 @@ describe('createCheckoutForEntry — refuses BEFORE calling Stripe', () => {
     ['an empty idempotency key', { idempotencyKey: '' }],
     ['an idempotency key over 255 characters', { idempotencyKey: 'k'.repeat(256) }],
     ['a malformed customer email', { customerEmail: 'not-an-email' }],
+    ['a customer name over 200 characters', { customerName: 'n'.repeat(201) }],
+    ['a customer name that is not a string', { customerName: 42 as unknown as string }],
     ['metadata that tries to set entry_id', { metadata: { entry_id: 'other-entry' } }],
     ['an empty entry id', { entryId: '' }],
   ])('rejects %s as invalid-input without touching storage or Stripe', async (_label, overrides) => {
-    const { client, create } = fakeClient();
+    const { client, create, customers } = fakeClient();
     const storage = fakeStorage();
 
     const result = await createCheckoutForEntry(input(overrides), { client, storage, now: () => NOW });
 
     expect(result).toMatchObject({ ok: false, code: 'invalid-input' });
     expect(create).not.toHaveBeenCalled();
+    expect(customers.list).not.toHaveBeenCalled();
     expect(storage.getEntryById).not.toHaveBeenCalled();
     expect(storage.attachPayment).not.toHaveBeenCalled();
   });
@@ -255,8 +473,8 @@ describe('createCheckoutForEntry — failures after Stripe', () => {
     vi.clearAllMocks();
   });
 
-  it('a Stripe error: provider-error, nothing recorded, no URL returned', async () => {
-    const { client } = fakeClient({
+  it('a Stripe error: provider-error, nothing recorded, no URL returned, and no second create (only an idempotency mismatch is retried)', async () => {
+    const { client, create } = fakeClient({
       create: vi.fn(async () => {
         throw new Error('api_key_expired');
       }),
@@ -268,6 +486,7 @@ describe('createCheckoutForEntry — failures after Stripe', () => {
     expect(result).toMatchObject({ ok: false, code: 'provider-error' });
     expect(result).not.toHaveProperty('url');
     expect(storage.attachPayment).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledTimes(1);
   });
 
   it('the payments row cannot be written: the session is EXPIRED, record-failed is returned with sessionExpired:true, and the URL is never handed out', async () => {
@@ -345,17 +564,26 @@ function withResponseHeaders<T extends object>(session: T, headers: Record<strin
 /**
  * Emulates Stripe's idempotency: the same key with the same params replays
  * the first session, flagged `Idempotent-Replayed: true` the way the API
- * does. `replayHeader: false` models an injected client that exposes no
- * response headers, so the package cannot tell a replay from a fresh create.
+ * does; the same key with different params is refused with the error
+ * stripe-node raises for it (`StripeIdempotencyError`, raw type
+ * `idempotency_error`, HTTP 400). `replayHeader: false` models an injected
+ * client that exposes no response headers, so the package cannot tell a
+ * replay from a fresh create.
  */
-function replayingClient(opts: { replayHeader?: boolean } = {}) {
+function replayingClient(opts: { replayHeader?: boolean; customers?: ReturnType<typeof fakeCustomers> } = {}) {
   const replayHeader = opts.replayHeader ?? true;
   const byKey = new Map<string, { params: string; session: Record<string, unknown> }>();
   let created = 0;
   const create = vi.fn(async (params: { expires_at: number }, callOpts: { idempotencyKey: string }) => {
     const prior = byKey.get(callOpts.idempotencyKey);
     if (prior) {
-      if (prior.params !== JSON.stringify(params)) throw new Error('idempotency_error: keys are for one request');
+      if (prior.params !== JSON.stringify(params)) {
+        throw new Stripe.errors.StripeIdempotencyError({
+          type: 'idempotency_error',
+          statusCode: 400,
+          message: `Keys for idempotent requests can only be used with the same parameters they were first used with. Try using a key other than '${callOpts.idempotencyKey}' if you meant to execute a different request.`,
+        });
+      }
       const replay = { ...prior.session };
       return replayHeader ? withResponseHeaders(replay, { 'idempotent-replayed': 'true' }) : replay;
     }
@@ -370,7 +598,12 @@ function replayingClient(opts: { replayHeader?: boolean } = {}) {
     return replayHeader ? withResponseHeaders(fresh, { 'request-id': 'req_test' }) : fresh;
   });
   const expire = vi.fn(async (id: string) => ({ id, status: 'expired' }));
-  return { client: { checkout: { sessions: { create, expire } } } as unknown as Stripe, create, expire };
+  const customers = opts.customers ?? fakeCustomers();
+  return {
+    client: { checkout: { sessions: { create, expire } }, customers: customers.resource } as unknown as Stripe,
+    create,
+    expire,
+  };
 }
 
 /** A client whose create always answers with a replay of `cs_test_replayed` (the key was used by an earlier call). */
@@ -444,6 +677,98 @@ describe('createCheckoutForEntry — a replayed idempotency key (double-click, b
     const rows = await storage.getPaymentsByEntry(entryId);
     expect(rows.map((row) => row.providerRef)).toEqual(['cs_test_replay_1']);
     expect(expire).not.toHaveBeenCalled();
+  });
+
+  // The customer lookup is part of the request: when it failed on the first
+  // call, that session was created with `customer_creation` + `customer_email`;
+  // a retry whose lookup succeeds would send `customer` instead, and Stripe
+  // refuses a reused key with different params. The retry must still fold
+  // into the first session, not fail.
+  it('the first call\'s customer lookup failed and the retry\'s succeeds: the call resends the first call\'s shape under the same key and gets the replay (same URL, one row)', async () => {
+    const customers = fakeCustomers({ failList: (call) => call === 0, seed: [adopted()] });
+    const { client, create, expire } = replayingClient({ customers });
+
+    const first = await createCheckoutForEntry(input({ entryId }), { client, storage, now: () => NOW });
+    const second = await createCheckoutForEntry(input({ entryId }), { client, storage, now: () => NOW });
+
+    expect(first).toMatchObject({ ok: true, sessionId: 'cs_test_replay_1' });
+    expect(second).toEqual(first);
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(create.mock.calls[0]![0]).toMatchObject({ customer_creation: 'always', customer_email: 'guest@example.com' });
+    expect(create.mock.calls[1]![0]).toMatchObject({ customer: 'cus_adopted' });
+    expect(create.mock.calls[2]![0]).toEqual(create.mock.calls[0]![0]);
+    expect(create.mock.calls.map((call) => call[1])).toEqual([
+      { idempotencyKey: 'quote-7f3c' },
+      { idempotencyKey: 'quote-7f3c' },
+      { idempotencyKey: 'quote-7f3c' },
+    ]);
+    const rows = await storage.getPaymentsByEntry(entryId);
+    expect(rows.map((row) => row.providerRef)).toEqual(['cs_test_replay_1']);
+    expect(expire).not.toHaveBeenCalled();
+  });
+
+  // The common way the shape changes: the first call found no Customer (a new
+  // payer), the payer paid, and the webhook adopted the Customer Stripe made.
+  // A resubmit of the same quote form now finds that Customer, so it would
+  // send `customer`; it must still fold into the first (paid) session.
+  it('the payer paid and was adopted between two posts of the same quote form: the retry folds into the first session (same URL, one row)', async () => {
+    const customers = fakeCustomers();
+    const { client, create, expire } = replayingClient({ customers });
+
+    const first = await createCheckoutForEntry(input({ entryId }), { client, storage, now: () => NOW });
+    customers.store.push(adopted());
+    const second = await createCheckoutForEntry(input({ entryId, customerEmail: 'Guest@Example.com' }), {
+      client,
+      storage,
+      now: () => NOW,
+    });
+
+    expect(first).toMatchObject({ ok: true, sessionId: 'cs_test_replay_1' });
+    expect(second).toEqual(first);
+    expect(create.mock.calls[0]![0]).toMatchObject({ customer_creation: 'always', customer_email: 'guest@example.com' });
+    expect(create.mock.calls[1]![0]).toMatchObject({ customer: 'cus_adopted' });
+    expect(create.mock.calls[2]![0]).toEqual(create.mock.calls[0]![0]);
+    const rows = await storage.getPaymentsByEntry(entryId);
+    expect(rows.map((row) => row.providerRef)).toEqual(['cs_test_replay_1']);
+    expect(expire).not.toHaveBeenCalled();
+  });
+
+  // The reverse: the first session carries `customer: <id>`, and the retry's
+  // lookup fails, so it has no id to resend. It cannot reproduce the first
+  // request, so it answers provider-error and changes nothing; a later retry
+  // whose lookup succeeds gets the replay.
+  it('the first call\'s lookup succeeded and the retry\'s fails: provider-error, nothing written or expired; a later retry with a working lookup gets the replay', async () => {
+    const customers = fakeCustomers({ failList: (call) => call === 1, seed: [adopted()] });
+    const { client, create, expire } = replayingClient({ customers });
+
+    const first = await createCheckoutForEntry(input({ entryId }), { client, storage, now: () => NOW });
+    const second = await createCheckoutForEntry(input({ entryId }), { client, storage, now: () => NOW });
+
+    expect(first).toMatchObject({ ok: true, sessionId: 'cs_test_replay_1' });
+    expect(second).toMatchObject({ ok: false, code: 'provider-error' });
+    expect(create).toHaveBeenCalledTimes(2);
+
+    const third = await createCheckoutForEntry(input({ entryId }), { client, storage, now: () => NOW });
+    expect(third).toEqual(first);
+    const rows = await storage.getPaymentsByEntry(entryId);
+    expect(rows.map((row) => row.providerRef)).toEqual(['cs_test_replay_1']);
+    expect(expire).not.toHaveBeenCalled();
+  });
+
+  // A key genuinely reused for a different quote (another amount) mismatches
+  // in either customer shape. One retry, then provider-error: never a loop,
+  // never a new session.
+  it('a key reused with a different amount is retried ONCE in the other customer shape, then answers provider-error', async () => {
+    const customers = fakeCustomers({ failList: (call) => call === 0, seed: [adopted()] });
+    const { client, create } = replayingClient({ customers });
+
+    await createCheckoutForEntry(input({ entryId }), { client, storage, now: () => NOW });
+    const changed = await createCheckoutForEntry(input({ entryId, amountCents: 300000 }), { client, storage, now: () => NOW });
+
+    expect(changed).toMatchObject({ ok: false, code: 'provider-error' });
+    expect(create).toHaveBeenCalledTimes(3);
+    const rows = await storage.getPaymentsByEntry(entryId);
+    expect(rows).toHaveLength(1);
   });
 
   it('overlapping calls through a client that exposes no replay header still leave one row: the storage write itself refuses a second row for the same session', async () => {

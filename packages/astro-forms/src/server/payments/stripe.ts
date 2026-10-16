@@ -19,6 +19,7 @@
 import Stripe from 'stripe';
 import { CHECKOUT_SESSION_TTL_MIN } from '../payment-constants.js';
 import type { FeeBreakdownLine } from '../../types.js';
+import { findReusableStripeCustomer } from './customers.js';
 
 export interface StripeDeps {
   client?: Stripe;
@@ -70,6 +71,8 @@ export interface CreatePaymentLinkInput {
   currency: string;
   memo?: string;
   entryId: string;
+  /** The payer's email. Prefills the Checkout email field through Stripe's `prefilled_email` link parameter. */
+  customerEmail?: string;
 }
 
 export interface CreatePaymentLinkResult {
@@ -81,8 +84,15 @@ export interface CreatePaymentLinkResult {
  * Ad-hoc Stripe Payment Link (PAY-01) — one `price_data` line item built
  * inline from `amountCents`, tagged with `metadata.entry_id` so an inbound
  * webhook (or manual lookup) can trace it back to the originating entry.
- * Payment Links automatically copy top-level metadata onto the resulting
- * Checkout Session, so no duplication into `payment_intent_data` is needed.
+ * Payment Links copy top-level metadata onto the resulting Checkout Session;
+ * `payment_intent_data` repeats `entry_id` (plus a description) on the
+ * PaymentIntent, which is the object Stripe's Payments list shows.
+ *
+ * Customer attribution (0.1.17): `customer_creation: 'always'` makes Stripe
+ * create a Customer when the link is paid; without it every payment was a
+ * guest checkout and the dashboard counted no customers. Payment Links
+ * cannot take an existing `customer` (API limitation), so a repeat payer gets
+ * a new Customer per link. `customerEmail` is appended as `prefilled_email`.
  *
  * The returned `providerRef` is the LINK id (`plink_…`); the Checkout
  * Session a payer completes gets its own `cs_…` id at pay time, so the
@@ -108,9 +118,21 @@ export async function createPaymentLink(
       },
     ],
     metadata: { entry_id: input.entryId },
+    customer_creation: 'always',
+    payment_intent_data: {
+      metadata: { entry_id: input.entryId },
+      description: input.memo || 'Payment request',
+    },
     restrictions: { completed_sessions: { limit: 1 } },
   });
-  return { url: link.url, providerRef: link.id };
+
+  let url = link.url;
+  if (input.customerEmail) {
+    const prefilled = new URL(url);
+    prefilled.searchParams.set('prefilled_email', input.customerEmail.trim());
+    url = prefilled.toString();
+  }
+  return { url, providerRef: link.id };
 }
 
 export interface CreateCheckoutSessionInput {
@@ -123,6 +145,14 @@ export interface CreateCheckoutSessionInput {
   successUrl: string;
   /** Fully-formed redirect URL from the caller — passed through byte-verbatim (checker B1). Never mutated here. */
   cancelUrl: string;
+  /** The payer's email. Matched to their existing Stripe Customer, else prefilled for the one Stripe creates (0.1.17). */
+  customerEmail?: string;
+  /**
+   * The payer's name. Accepted for API compatibility but not sent to Stripe
+   * (0.1.17 security): it is visitor input, and Checkout collects the
+   * payer's own name.
+   */
+  customerName?: string;
 }
 
 export interface CreateCheckoutSessionResult {
@@ -139,6 +169,33 @@ export interface CreateCheckoutSessionResult {
  * `success_url`/`cancel_url` are `input.successUrl`/`input.cancelUrl`
  * assigned verbatim — no template string, no `siteUrl` concatenation, no
  * trailing-slash handling of any kind happens in this function.
+ *
+ * Customer attribution (0.1.17): the email here is typed by an anonymous
+ * visitor, so it is only ever LOOKED UP (`findReusableStripeCustomer`, see
+ * customers.ts for the lifecycle). A payer whose earlier payment the webhook
+ * adopted gets that Customer (`customer: <id>`), so a repeat payer's payments
+ * share one Customer. Otherwise (a new payer, no email, or a failed lookup,
+ * which never throws) the session sends `customer_creation: 'always'` plus
+ * the normalized `customer_email` when known, so Stripe creates the Customer
+ * only when the payer actually confirms. Stripe rejects `customer_creation`
+ * or `customer_email` together with `customer`, so neither is ever sent with
+ * it. Nothing a visitor types is written to a Customer: `customerName` is not
+ * sent, and Checkout collects the payer's own name.
+ *
+ * A session with `customer` also sends `saved_payment_method_options:
+ * { payment_method_save: 'disabled' }` (Stripe's documented default, sent
+ * explicitly so the guarantee does not rest on a default) and never
+ * `setup_future_usage`, so those Customers never hold a card Checkout would
+ * show to the next person who types the same email; and, because this
+ * session's payment methods come from the dashboard,
+ * `excluded_payment_method_types: ['customer_balance']`: attaching an
+ * email-matched Customer would otherwise enable bank transfers paid from
+ * that Customer's cash balance, letting anyone who knows a payer's email
+ * spend the payer's balance (0.1.17 audit).
+ * `payment_intent_data` carries `entry_id` and a description on the
+ * PaymentIntent, which is what Stripe's Payments list shows;
+ * `client_reference_id` puts the entry id on the dashboard's session view
+ * and exports.
  */
 export async function createCheckoutSession(
   input: CreateCheckoutSessionInput,
@@ -167,6 +224,9 @@ export async function createCheckoutSession(
     ),
   ];
 
+  const customerEmail = input.customerEmail?.trim().toLowerCase() || undefined;
+  const customerId = customerEmail ? await findReusableStripeCustomer({ email: customerEmail }, client) : undefined;
+
   const session = await client.checkout.sessions.create({
     mode: 'payment',
     line_items: lineItems,
@@ -174,6 +234,21 @@ export async function createCheckoutSession(
     cancel_url: input.cancelUrl,
     expires_at: Math.floor(Date.now() / 1000) + CHECKOUT_SESSION_TTL_MIN * 60,
     metadata: { entry_id: input.entryId },
+    client_reference_id: input.entryId,
+    payment_intent_data: {
+      metadata: { entry_id: input.entryId },
+      description: input.memo ?? 'Payment',
+    },
+    ...(customerId
+      ? {
+          customer: customerId,
+          saved_payment_method_options: { payment_method_save: 'disabled' as const },
+          excluded_payment_method_types: ['customer_balance' as const],
+        }
+      : {
+          customer_creation: 'always' as const,
+          ...(customerEmail ? { customer_email: customerEmail } : {}),
+        }),
   });
 
   return { url: session.url ?? '', providerRef: session.id };

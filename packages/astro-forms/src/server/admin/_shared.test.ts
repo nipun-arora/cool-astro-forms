@@ -31,6 +31,7 @@ import {
   renderPaymentRequestChipHtml,
   renderPaymentsSectionHtml,
   renderPaymentsTableHtml,
+  stripeCustomerUrl,
 } from './_shared.js';
 
 describe('adminUrl', () => {
@@ -918,5 +919,162 @@ describe('renderPaymentsSectionHtml (entry detail, 0.1.15)', () => {
 
   it('renders the EMPTY state when there are no payments', () => {
     expect(renderPaymentsSectionHtml(base)).toContain('No payments yet.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.1.17 — payer visibility. Every paid Stripe payment records its Stripe
+// Customer and payer email; the admin shows both so a repeat payer is
+// recognisable and the operator can jump to the customer in Stripe. The
+// email is payer-controlled text and the customer id ends up inside a URL,
+// so the email is escaped and an id that is not a plain `cus_…` is never
+// turned into a link.
+// ---------------------------------------------------------------------------
+
+describe('stripeCustomerUrl (0.1.17)', () => {
+  it('builds the live dashboard URL, and the /test/ one for test-mode payments', () => {
+    expect(stripeCustomerUrl('cus_ABC123', false)).toBe('https://dashboard.stripe.com/customers/cus_ABC123');
+    expect(stripeCustomerUrl('cus_ABC123', true)).toBe('https://dashboard.stripe.com/test/customers/cus_ABC123');
+  });
+
+  it.each([
+    ['empty', ''],
+    ['no cus_ prefix', 'ABC123'],
+    ['a path segment', 'cus_ABC/../../logout'],
+    ['a query', 'cus_ABC?x=1'],
+    ['a quote that would break out of the attribute', 'cus_ABC"onmouseover="x'],
+    ['markup', 'cus_<script>'],
+    ['whitespace', 'cus_ABC 123'],
+    ['a newline', 'cus_ABC\n'],
+    ['only the prefix', 'cus_'],
+  ])('refuses a malformed customer id (%s): no URL is ever built from it', (_label, id) => {
+    expect(stripeCustomerUrl(id, false)).toBeUndefined();
+  });
+
+  it('returns undefined for a missing customer', () => {
+    expect(stripeCustomerUrl(undefined, false)).toBeUndefined();
+    expect(stripeCustomerUrl(null, false)).toBeUndefined();
+  });
+});
+
+describe('payer on the Payments list (0.1.17)', () => {
+  const table = (payments: Payment[]) =>
+    renderPaymentsTableHtml({ payments, total: payments.length, filter: {}, basePath: '/forms-admin/payments' });
+
+  it('adds a Payer column after Entry, before Pay link', () => {
+    const html = table([paymentRow()]);
+    expect(html).toContain('<th scope="col">Entry</th><th scope="col">Payer</th><th scope="col">Pay link</th>');
+  });
+
+  it('shows the payer email and a Stripe customer link that opens safely in a new tab', () => {
+    const html = table([
+      paymentRow({ status: 'paid', providerRef: 'cs_live_x', customerRef: 'cus_ABC123', payerEmail: 'payer@example.com' }),
+    ]);
+    expect(html).toContain('payer@example.com');
+    expect(html).toContain(
+      '<a href="https://dashboard.stripe.com/customers/cus_ABC123" target="_blank" rel="noopener noreferrer">Stripe customer</a>',
+    );
+  });
+
+  it('escapes the payer email: it is payer-controlled text', () => {
+    const html = table([paymentRow({ payerEmail: '"><img src=x onerror=alert(1)>@example.com' })]);
+    expect(html).not.toContain('<img');
+    expect(html).toContain('&lt;img');
+    expect(html).toContain('&quot;&gt;');
+  });
+
+  it('rejects a malformed customer id: the email still shows, but there is no link and the id is not echoed into markup', () => {
+    const html = table([
+      paymentRow({ customerRef: 'cus_x"><script>alert(1)</script>', payerEmail: 'payer@example.com' }),
+    ]);
+    expect(html).toContain('payer@example.com');
+    expect(html).not.toContain('Stripe customer');
+    expect(html).not.toContain('dashboard.stripe.com');
+    expect(html).not.toContain('<script>');
+  });
+
+  it('links the test-mode dashboard for a test session ref, and for a row whose paid event said livemode false (a plink_ row has no cs_test_ prefix)', () => {
+    const byRef = table([paymentRow({ providerRef: 'cs_test_abc', customerRef: 'cus_T1' })]);
+    expect(byRef).toContain('href="https://dashboard.stripe.com/test/customers/cus_T1"');
+
+    const byEvent = table([
+      paymentRow({
+        providerRef: 'plink_1',
+        customerRef: 'cus_T2',
+        events: [{ id: 'evt_1', type: 'checkout.session.completed', at: 1, livemode: false }],
+      }),
+    ]);
+    expect(byEvent).toContain('href="https://dashboard.stripe.com/test/customers/cus_T2"');
+  });
+
+  it('links the live dashboard for a live ref, and when test-versus-live cannot be told (falls back to live)', () => {
+    const live = table([
+      paymentRow({
+        providerRef: 'plink_1',
+        customerRef: 'cus_L1',
+        events: [{ id: 'evt_1', type: 'checkout.session.completed', at: 1, livemode: true }],
+      }),
+    ]);
+    expect(live).toContain('href="https://dashboard.stripe.com/customers/cus_L1"');
+
+    const unknown = table([paymentRow({ providerRef: undefined, customerRef: 'cus_U1' })]);
+    expect(unknown).toContain('href="https://dashboard.stripe.com/customers/cus_U1"');
+  });
+
+  it('renders an empty Payer cell for a payment with no customer data, without printing "undefined" or "null"', () => {
+    const html = table([paymentRow({ customerRef: null, payerEmail: null })]);
+    expect(html).toContain('<td></td>');
+    expect(html).not.toContain('undefined');
+    expect(html).not.toContain('null');
+    expect(html).not.toContain('Stripe customer');
+  });
+
+  it('a customer id without an email still links (and an email without a customer id shows no link)', () => {
+    const onlyCustomer = table([paymentRow({ customerRef: 'cus_ONLY' })]);
+    expect(onlyCustomer).toContain('Stripe customer');
+    const onlyEmail = table([paymentRow({ payerEmail: 'only@example.com' })]);
+    expect(onlyEmail).toContain('only@example.com');
+    expect(onlyEmail).not.toContain('Stripe customer');
+  });
+});
+
+describe('payer on the entry-detail Payments block (0.1.17)', () => {
+  const base = {
+    entryId: 'e1',
+    payments: [] as Payment[],
+    providerConfigured: true,
+    paymentActionUrl: '/forms-admin/payments/action',
+    adminQuote: 'off' as const,
+    quoteCurrency: 'usd',
+  };
+
+  it('shows the same payer email and Stripe customer link on the entry payment row', () => {
+    const html = renderPaymentsSectionHtml({
+      ...base,
+      payments: [
+        paymentRow({ status: 'paid', providerRef: 'cs_live_x', customerRef: 'cus_ABC123', payerEmail: 'payer@example.com' }),
+      ],
+    });
+    expect(html).toContain('Payer: payer@example.com');
+    expect(html).toContain(
+      '<a href="https://dashboard.stripe.com/customers/cus_ABC123" target="_blank" rel="noopener noreferrer">Stripe customer</a>',
+    );
+  });
+
+  it('escapes the email and refuses a malformed customer id', () => {
+    const html = renderPaymentsSectionHtml({
+      ...base,
+      payments: [paymentRow({ customerRef: 'cus_a"b', payerEmail: '<b>x</b>@example.com' })],
+    });
+    expect(html).not.toContain('<b>');
+    expect(html).toContain('&lt;b&gt;');
+    expect(html).not.toContain('Stripe customer');
+    expect(html).not.toContain('dashboard.stripe.com');
+  });
+
+  it('adds no Payer line for a payment without customer data (pre-0.1.17 rows render as before)', () => {
+    const html = renderPaymentsSectionHtml({ ...base, payments: [paymentRow()] });
+    expect(html).not.toContain('Payer');
+    expect(html).not.toContain('Stripe customer');
   });
 });

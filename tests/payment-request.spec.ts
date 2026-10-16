@@ -40,12 +40,15 @@ import { test, expect } from '@playwright/test';
 import { PAY_FAIL_URL, PAY_PASS_URL, STRIPE_MOCK_PORT } from '../playwright.config';
 
 let stripeMock: Server | undefined;
-let stripeMockHits = 0;
+// `${method} ${path}` per mock hit, in arrival order. A Stripe-path request
+// with an email makes several calls (customer lookup, then the Checkout
+// Session), so tests assert on the sequence, not a bare count.
+let stripeMockHits: string[] = [];
 
 test.beforeAll(async () => {
-  stripeMockHits = 0;
+  stripeMockHits = [];
   stripeMock = createServer((req, res) => {
-    stripeMockHits++;
+    stripeMockHits.push(`${req.method} ${(req.url ?? '').split('?')[0]}`);
     // A well-shaped Stripe error envelope (RESEARCH.md-documented error
     // contract) — the SDK parses this into a thrown StripeError regardless
     // of the specific type/code, which create-session.ts's catch-all turns
@@ -141,10 +144,13 @@ test.describe('PAY-05 create-session — server gates live (PAY_PASS_URL, traili
     const token = await page.locator('.cf-turnstile input[name="cf-turnstile-response"]').inputValue();
     expect(token.length).toBeGreaterThan(0);
 
-    const hitsBefore = stripeMockHits;
+    const hitsBefore = stripeMockHits.length;
     const res = await request.post(`${PAY_PASS_URL}${action}`, {
       headers: { Origin: PAY_PASS_URL },
-      form: { amount: '200', currency: 'usd', 'cf-turnstile-response': token },
+      // A valid payer email makes the Stripe path look up the Customer
+      // (lookup only, never create) before the Checkout Session
+      // (payment-request.ts step 5b).
+      form: { amount: '200', currency: 'usd', email: 'payer@example.com', 'cf-turnstile-response': token },
     });
 
     // 500 (provider error) proves origin/payload/rate-limit/validation/
@@ -154,17 +160,25 @@ test.describe('PAY-05 create-session — server gates live (PAY_PASS_URL, traili
     expect(body).toEqual({ ok: false, reason: 'error' });
     // Reached the LOCAL mock (not a validation/turnstile short-circuit) —
     // and never any live api.stripe.com network hop (hard rule).
-    expect(stripeMockHits).toBe(hitsBefore + 1);
+    // The exact number of lookup calls is deliberately not pinned: the
+    // request must end on the Checkout Session create, preceded by at least
+    // one customer lookup.
+    const hits = stripeMockHits.slice(hitsBefore);
+    expect(hits.at(-1)).toBe('POST /v1/checkout/sessions');
+    expect(hits.slice(0, -1)).toContain('GET /v1/customers');
   });
 });
 
 test.describe('PAY-05 create-session — Turnstile hard gate (PAY_FAIL_URL, ALWAYS-FAIL pair)', () => {
   test('a POST with no Turnstile token is rejected 403 BEFORE any provider call', async ({ request }) => {
-    const hitsBefore = stripeMockHits;
+    const hitsBefore = stripeMockHits.length;
 
     const res = await request.post(`${PAY_FAIL_URL}/api/forms/pay/create-session`, {
       headers: { Origin: PAY_FAIL_URL },
-      form: { amount: '200', currency: 'usd' },
+      // A valid email is included so the request exercises the same payload
+      // as the pass-path test; email validation runs BEFORE the gate
+      // (payment-request.ts step 5b), so a malformed one would 400 first.
+      form: { amount: '200', currency: 'usd', email: 'payer@example.com' },
     });
 
     expect(res.status()).toBe(403);
@@ -172,7 +186,7 @@ test.describe('PAY-05 create-session — Turnstile hard gate (PAY_FAIL_URL, ALWA
     // Since 0.1.9 the short-circuit names Cloudflare's own code for an absent
     // token, and since 0.1.10 fetch-shaped JSON rejects carry it too.
     expect(body).toEqual({ ok: false, reason: 'turnstile', code: 'missing-input-response' });
-    expect(stripeMockHits).toBe(hitsBefore); // never reached the provider boundary
+    expect(stripeMockHits.length).toBe(hitsBefore); // never reached the provider boundary
   });
 });
 

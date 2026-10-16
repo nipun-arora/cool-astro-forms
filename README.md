@@ -140,7 +140,7 @@ With Astro's `security.csp` turned on, the `/forms-admin` pages stay styled and 
 
    ![Form abandonment analytics — a 12 started, 8 abandoned, 1 submitted funnel with a 66.7% abandonment rate and top drop-off fields](.github/assets/admin-analytics.png)
 
-7. Payments close the loop: create a quote from any entry, or share `/forms-pay?amount=200`. The server recomputes every total, and only a verified provider webhook marks a payment paid. The pay page submits over fetch and hops to the provider as a plain GET, so edge bot-challenges (Cloudflare and friends) cannot break the checkout hop; see [`docs/payments.md`](./docs/payments.md) section 3b.
+7. Payments close the loop: create a quote from any entry, or share `/forms-pay?amount=200` (the payer enters an email; Stripe records them as a Customer when they pay, and their next payment is matched to it). The server recomputes every total, and only a verified provider webhook marks a payment paid. The pay page submits over fetch and hops to the provider as a plain GET, so edge bot-challenges (Cloudflare and friends) cannot break the checkout hop; see [`docs/payments.md`](./docs/payments.md) section 3b.
 
    ![Shareable payment-request page at /forms-pay with a server-computed fee breakdown](.github/assets/pay-page.png)
 

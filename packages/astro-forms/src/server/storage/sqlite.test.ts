@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,7 +7,7 @@ import Database from 'better-sqlite3';
 import { runStorageContract } from './adapter.contract.js';
 import { SqliteStorage } from './sqlite.js';
 import { getDb, resetDbCache } from './db.js';
-import { MIGRATIONS } from './migrations.js';
+import { MIGRATION_SQL, MIGRATIONS, migrationStatements } from './migrations.js';
 
 // ---------------------------------------------------------------------------
 // Generic contract — every case here exercises ONLY the public
@@ -679,10 +680,11 @@ describe('migrations — v5 (rate_limits table)', () => {
     resetDbCache();
   });
 
-  it('boots a fresh :memory: db at user_version 5 with the rate_limits table present (bucket_key PK, tokens/last_refill_ms NOT NULL)', () => {
+  it('boots a fresh :memory: db at the latest user_version (>= v5) with the rate_limits table present (bucket_key PK, tokens/last_refill_ms NOT NULL)', () => {
     const db = getDb(':memory:');
+    // Latest, not a pinned 5: v6 moved the ceiling (same reasoning as the v2-v4 tests above).
     expect(db.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
-    expect(MIGRATIONS.length).toBe(5);
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(5);
 
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rate_limits'")
@@ -732,7 +734,8 @@ describe('migrations — v5 (rate_limits table)', () => {
 
     expect(() => getDb(dbPath)).not.toThrow();
     const migrated = getDb(dbPath);
-    expect(migrated.pragma('user_version', { simple: true })).toBe(5);
+    // getDb runs ALL pending migrations, so a v4 db lands on the latest version, not on 5.
+    expect(migrated.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
 
     const tables = migrated
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rate_limits'")
@@ -761,5 +764,192 @@ describe('migrations — v5 (rate_limits table)', () => {
     expect(MIGRATION_SQL).toHaveLength(MIGRATIONS.length);
     expect(MIGRATION_SQL[4]).toContain('rate_limits');
     expect(MIGRATION_SQL[4]).toContain('bucket_key');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// migrations.ts — v6 (payments.customer_ref + payments.payer_email, additive-only, 0.1.17)
+// ---------------------------------------------------------------------------
+
+describe('migrations — v6 (payments.customer_ref + payments.payer_email)', () => {
+  beforeEach(() => {
+    resetDbCache();
+  });
+
+  afterEach(() => {
+    resetDbCache();
+  });
+
+  it('is the sixth migration and adds exactly two nullable payments columns', () => {
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(6);
+    expect(MIGRATION_SQL[5]).toContain('ALTER TABLE payments ADD COLUMN customer_ref TEXT');
+    expect(MIGRATION_SQL[5]).toContain('ALTER TABLE payments ADD COLUMN payer_email TEXT');
+    // Additive-only policy: nothing dropped, renamed or re-constrained.
+    expect(MIGRATION_SQL[5]).not.toMatch(/DROP|RENAME|CHECK/i);
+  });
+
+  it('migrates a v5 db forward to v6 without touching existing rows: both columns appear nullable, a pre-existing paid payment keeps every value and reads back with no customer data', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'caf-migrate-v6-'));
+    const dbPath = path.join(tmpDir, 'forms.db');
+
+    // A deployed v5 forms.db: only migrations[0..4] applied.
+    const raw = new Database(dbPath);
+    for (let i = 0; i < 5; i++) MIGRATIONS[i]!(raw);
+    raw.pragma('user_version = 5');
+    raw
+      .prepare(
+        `INSERT INTO entries (id, site_id, form_id, status, fields, visitor_uuid, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run('legacy-entry-v5', 'site-a', 'form-1', 'submitted', '{}', 'visitor-1', Date.now(), Date.now());
+    raw
+      .prepare(
+        `INSERT INTO payments (id, entry_id, provider, amount_cents, currency, status, pay_link_url, provider_ref, provider_ids, events, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run('legacy-payment-v5', 'legacy-entry-v5', 'stripe', 2500, 'usd', 'paid', null, 'cs_live_legacy', null, null, 1000, 2000);
+    raw.close();
+
+    const migrated = getDb(dbPath);
+    expect(migrated.pragma('user_version', { simple: true })).toBe(MIGRATIONS.length);
+
+    const cols = migrated.prepare('PRAGMA table_info(payments)').all() as { name: string; notnull: number }[];
+    for (const name of ['customer_ref', 'payer_email']) {
+      const col = cols.find((c) => c.name === name);
+      expect(col, name).toBeDefined();
+      expect(col?.notnull, name).toBe(0);
+    }
+
+    const row = migrated.prepare('SELECT * FROM payments WHERE id = ?').get('legacy-payment-v5') as Record<string, unknown>;
+    expect(row.customer_ref).toBeNull();
+    expect(row.payer_email).toBeNull();
+    expect(row.amount_cents).toBe(2500);
+    expect(row.status).toBe('paid');
+    expect(row.provider_ref).toBe('cs_live_legacy');
+    expect(row.created_at).toBe(1000);
+
+    const payment = await new SqliteStorage(migrated).getPaymentByProviderRef('cs_live_legacy');
+    expect(payment?.status).toBe('paid');
+    expect(payment?.customerRef).toBeUndefined();
+    expect(payment?.payerEmail).toBeUndefined();
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration runner (0.1.17 audit, LOW) — each block and its user_version
+// bump commit as one BEGIN IMMEDIATE transaction that re-reads the version
+// under the write lock, and an ADD COLUMN whose column already exists counts
+// as applied. A database a crash (or the Turso adapter, which shares this
+// file format) left half-way through v6 must boot, and a second process that
+// read the old version just before another runner committed must not re-run
+// the block.
+// ---------------------------------------------------------------------------
+
+describe('migrations — runner atomicity + re-run tolerance', () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    resetDbCache();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'caf-migrate-runner-'));
+    dbPath = path.join(tmpDir, 'forms.db');
+  });
+
+  afterEach(() => {
+    resetDbCache();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** A deployed v5 forms.db (WAL, as getDb leaves it). */
+  function seedV5(): Database.Database {
+    const raw = new Database(dbPath);
+    raw.pragma('journal_mode = WAL');
+    for (let i = 0; i < 5; i++) MIGRATIONS[i]!(raw);
+    raw.pragma('user_version = 5');
+    return raw;
+  }
+
+  function paymentColumns(db: Database.Database): string[] {
+    return (db.prepare('PRAGMA table_info(payments)').all() as { name: string }[]).map((c) => c.name);
+  }
+
+  it('recovers a v5 db left half-way through v6 (customer_ref present, payer_email and the version bump missing): getDb boots to v6 with both columns', () => {
+    const raw = seedV5();
+    raw.exec('ALTER TABLE payments ADD COLUMN customer_ref TEXT');
+    raw.close();
+
+    const migrated = getDb(dbPath);
+    expect(migrated.pragma('user_version', { simple: true })).toBe(6);
+    const cols = paymentColumns(migrated);
+    expect(cols.filter((name) => name === 'customer_ref')).toHaveLength(1);
+    expect(cols).toContain('payer_email');
+  });
+
+  it('a second process that read v5 while another runner held v6 uncommitted boots to v6 without re-running the block', async () => {
+    // Runner A: mid-way through v6 inside its write transaction, not yet committed.
+    const runnerA = seedV5();
+    runnerA.exec('BEGIN IMMEDIATE');
+    MIGRATIONS[5]!(runnerA);
+    runnerA.pragma('user_version = 6');
+
+    // Runner B: the real getDb in a separate process (a second serverless
+    // instance or cluster worker). Plain node strips the TypeScript; the
+    // resolve hook maps db.ts's `./migrations.js`-style specifiers to .ts.
+    const child = spawn(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        [
+          "import { register } from 'node:module';",
+          "register('data:text/javascript,' + encodeURIComponent('export async function resolve(s, c, next) { try { return await next(s, c); } catch (e) { if (s.startsWith(\".\") && s.endsWith(\".js\")) return next(s.slice(0, -3) + \".ts\", c); throw e; } }'));",
+          'const { getDb } = await import(process.env.CAF_DB_MODULE);',
+          "console.log('ready');",
+          "console.log('RESULT ' + getDb().pragma('user_version', { simple: true }));",
+        ].join('\n'),
+      ],
+      {
+        cwd: path.resolve(import.meta.dirname, '../../..'),
+        env: { ...process.env, CAF_DB_PATH: dbPath, CAF_DB_MODULE: new URL('./db.ts', import.meta.url).href },
+      },
+    );
+
+    let stdout = '';
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+    const exited = new Promise<number | null>((resolve) => child.on('close', resolve));
+    await new Promise<void>((resolve, reject) => {
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString();
+        if (stdout.includes('ready')) resolve();
+      });
+      child.on('close', () => reject(new Error('child exited before ready: ' + stderr)));
+    });
+
+    // B has read user_version (5) by now and is about to migrate; A commits.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    runnerA.exec('COMMIT');
+
+    expect(await exited, stderr).toBe(0);
+    expect(stdout).toContain('RESULT 6');
+    const cols = paymentColumns(runnerA);
+    expect(cols.filter((name) => name === 'customer_ref')).toHaveLength(1);
+    expect(cols.filter((name) => name === 'payer_email')).toHaveLength(1);
+    runnerA.close();
+  }, 20_000);
+
+  it('applying every block statement by statement builds exactly the schema db.exec(block) builds (the splitter never cuts a statement)', () => {
+    const whole = new Database(':memory:');
+    const split = new Database(':memory:');
+    for (const sql of MIGRATION_SQL) {
+      whole.exec(sql);
+      for (const statement of migrationStatements(sql)) split.prepare(statement).run();
+    }
+    const schema = (db: Database.Database) => db.prepare('SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name').all();
+    expect(schema(split)).toEqual(schema(whole));
+    whole.close();
+    split.close();
   });
 });

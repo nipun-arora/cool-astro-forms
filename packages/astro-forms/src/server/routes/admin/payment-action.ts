@@ -138,9 +138,11 @@ export const POST: APIRoute = async ({ request }) => {
     if (!entry) return badRequest();
 
     let link: { url: string; providerRef: string } | undefined;
+    const entryEmail = extractEntryEmail(entry.fields);
 
     if (provider === 'stripe') {
-      const result = await createPaymentLink({ amountCents, currency, memo, entryId });
+      // 0.1.17: the captured address prefills the payer's email on the link.
+      const result = await createPaymentLink({ amountCents, currency, memo, entryId, customerEmail: entryEmail });
       link = { url: result.url, providerRef: result.providerRef };
     } else if (paypalConfigured()) {
       // No dedicated payment-confirmation page exists in this plan's scope
@@ -179,7 +181,7 @@ export const POST: APIRoute = async ({ request }) => {
     // Auto-send the quote (PAY-02) fire-and-forget — a copy-link is always
     // shown on entry-detail regardless of email success (T-03-27 caveat:
     // only the public pay-link URL, never a secret, is ever stored/shown).
-    const notifyTo = extractEntryEmail(entry.fields) ?? config.forms[entry.formId]?.notifyTo;
+    const notifyTo = entryEmail ?? config.forms[entry.formId]?.notifyTo;
     if (notifyTo) {
       const templateOverride = (config as ConfigWithTemplates).templates?.paymentQuote;
       sendPaymentQuoteEmail(

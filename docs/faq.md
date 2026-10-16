@@ -20,7 +20,7 @@ Not by default. The default deployment is a SQLite file on your server plus your
 
 ## Does it support payments?
 
-Yes, quote-first payments: create a payment link from any entry in the admin, or share `/forms-pay?amount=200` directly. The server recomputes every total (client values are preview only), checkout runs on Stripe Checkout or PayPal, and a payment is marked paid only by a signature-verified provider webhook. The pay page submits over fetch and hops to checkout as a plain GET, so edge bot-challenges cannot break it.
+Yes, quote-first payments: create a payment link from any entry in the admin, or share `/forms-pay?amount=200` directly (the payer enters an email; Stripe records them as a Customer when they pay, and their next payment is matched to it). The server recomputes every total (client values are preview only), checkout runs on Stripe Checkout or PayPal, and a payment is marked paid only by a signature-verified provider webhook. The pay page submits over fetch and hops to checkout as a plain GET, so edge bot-challenges cannot break it.
 
 ## Is it free?
 

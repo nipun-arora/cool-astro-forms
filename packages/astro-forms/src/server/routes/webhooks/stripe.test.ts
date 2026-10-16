@@ -2,14 +2,18 @@ import Stripe from 'stripe';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_WEBHOOK_PAYLOAD_BYTES } from '../../payment-constants.js';
 
-const { handleInboundPaymentMock, sendPaymentReceivedEmailMock, sqliteStorageMock, deliverWebhookMock } = vi.hoisted(
+const { handleInboundPaymentMock, sendPaymentReceivedEmailMock, sqliteStorageMock, deliverWebhookMock, stripeClientHolder } = vi.hoisted(
   () => ({
-    handleInboundPaymentMock: vi.fn(async (_input: unknown, _deps: unknown) => ({ status: 200 })),
+    handleInboundPaymentMock: vi.fn(
+      async (_input: unknown, _deps: unknown): Promise<{ status: number; markedPaid?: boolean }> => ({ status: 200 }),
+    ),
     sendPaymentReceivedEmailMock: vi.fn(async () => undefined),
     sqliteStorageMock: vi.fn(function FakeSqliteStorage() {
       return {};
     }),
     deliverWebhookMock: vi.fn(),
+    /** The client `getStripeClient` hands the route (a real Stripe instance whose `customers.update` is a spy). */
+    stripeClientHolder: { current: undefined as unknown },
   }),
 );
 
@@ -43,7 +47,16 @@ vi.mock('../../storage/db.js', () => ({ getDb: vi.fn(() => ({})) }));
 vi.mock('../../storage/sqlite.js', () => ({ SqliteStorage: sqliteStorageMock }));
 vi.mock('../../webhooks/deliver.js', () => ({ deliverWebhook: deliverWebhookMock }));
 vi.mock('../../log.js', () => ({ log: vi.fn(), logError: vi.fn() }));
+// Only the client factory is replaced: verifyStripeWebhook stays real, and
+// the client the route gets verifies signatures for real (pure crypto) while
+// its customers.update is a spy, so no test reaches Stripe's network.
+vi.mock('../../payments/stripe.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../payments/stripe.js')>()),
+  getStripeClient: vi.fn(() => (process.env.STRIPE_SECRET_KEY ? stripeClientHolder.current : undefined)),
+}));
 
+import { log, logError } from '../../log.js';
+import { getStripeClient } from '../../payments/stripe.js';
 import { POST } from './stripe.js';
 
 // verifyStripeWebhook itself is NEVER mocked — real (network-free) signature
@@ -75,7 +88,16 @@ describe('POST /api/forms/webhooks/stripe', () => {
     sqliteStorageMock.mockImplementation(function FakeSqliteStorage() {
       return {};
     });
+    const stripeClient = new Stripe('sk_test_dummy');
+    vi.spyOn(stripeClient.customers, 'update').mockResolvedValue({ id: 'cus_x' } as Stripe.Response<Stripe.Customer>);
+    stripeClientHolder.current = stripeClient;
+    vi.mocked(getStripeClient).mockClear();
+    vi.mocked(log).mockClear();
+    vi.mocked(logError).mockClear();
   });
+
+  /** The spy standing in for Stripe's customers.update on the route's client. */
+  const customersUpdate = () => vi.mocked((stripeClientHolder.current as Stripe).customers.update);
 
   afterEach(() => {
     if (ORIGINAL_WEBHOOK_SECRET === undefined) delete process.env.STRIPE_WEBHOOK_SECRET;
@@ -193,6 +215,198 @@ describe('POST /api/forms/webhooks/stripe', () => {
     expect(res.status).toBe(200);
     const [input] = handleInboundPaymentMock.mock.calls[0] as [Record<string, unknown>, unknown];
     expect(input).toMatchObject({ providerRef: 'cs_async', eventType: 'checkout.session.async_payment_succeeded' });
+  });
+
+  // 0.1.17: the route reads the Stripe Customer and the payer email off the
+  // VERIFIED session and hands them to the handler, which writes them only on
+  // a real paid transition. These pin the extraction, not the write.
+  describe('payer data (0.1.17)', () => {
+    async function postSession(session: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+      const client = new Stripe('sk_test_dummy');
+      const payload = JSON.stringify({
+        id: 'evt_payer',
+        type: 'checkout.session.completed',
+        ...extra,
+        data: { object: { id: 'cs_payer', amount_total: 2500, currency: 'usd', payment_status: 'paid', ...session } },
+      });
+      const signature = client.webhooks.generateTestHeaderString({ payload, secret: WEBHOOK_SECRET });
+      const res = await POST(makeCtx(payload, { 'stripe-signature': signature }));
+      const [input] = handleInboundPaymentMock.mock.calls[0] as [Record<string, unknown>, unknown];
+      return { res, input };
+    }
+
+    it('forwards the session customer id and the payer email so a repeat payer can be traced on the payment row', async () => {
+      const { res, input } = await postSession({
+        customer: 'cus_ABC123',
+        customer_details: { email: 'payer@example.com' },
+      });
+      expect(res.status).toBe(200);
+      expect(input).toMatchObject({ customerRef: 'cus_ABC123', payerEmail: 'payer@example.com' });
+    });
+
+    it('reads the id off an expanded customer object', async () => {
+      const { input } = await postSession({ customer: { id: 'cus_EXPANDED', object: 'customer' } });
+      expect(input.customerRef).toBe('cus_EXPANDED');
+    });
+
+    it('lowercases and trims the email, so the same payer typing different casing is one payer', async () => {
+      const { input } = await postSession({ customer_details: { email: '  Payer@Example.COM ' } });
+      expect(input.payerEmail).toBe('payer@example.com');
+    });
+
+    it('falls back to customer_email when customer_details has no (or a blank) email', async () => {
+      const blank = await postSession({ customer_details: { email: '   ' }, customer_email: 'Prefill@Example.com' });
+      expect(blank.input.payerEmail).toBe('prefill@example.com');
+    });
+
+    it('prefers the email the payer actually used (customer_details) over the prefilled customer_email', async () => {
+      const { input } = await postSession({
+        customer_details: { email: 'typed@example.com' },
+        customer_email: 'prefill@example.com',
+      });
+      expect(input.payerEmail).toBe('typed@example.com');
+    });
+
+    it('omits both keys for a guest checkout (null customer, no email) instead of sending nulls', async () => {
+      const { input } = await postSession({ customer: null, customer_details: null, customer_email: null });
+      expect('customerRef' in input).toBe(false);
+      expect('payerEmail' in input).toBe(false);
+    });
+
+    it('forwards event.livemode so the admin can link the test or live Stripe dashboard', async () => {
+      const live = await postSession({}, { livemode: true });
+      expect(live.input.livemode).toBe(true);
+      handleInboundPaymentMock.mockClear();
+      const test = await postSession({}, { livemode: false });
+      expect(test.input.livemode).toBe(false);
+    });
+
+    it('never logs the payer email or customer id', async () => {
+      await postSession({ customer: 'cus_ABC123', customer_details: { email: 'payer@example.com' } });
+      const logged = JSON.stringify([
+        ...(log as ReturnType<typeof vi.fn>).mock.calls,
+        ...(logError as ReturnType<typeof vi.fn>).mock.calls,
+      ]);
+      expect(logged).not.toContain('payer@example.com');
+      expect(logged).not.toContain('cus_ABC123');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 0.1.17 adoption. Checkout never creates or writes a Customer from visitor
+  // input: a new payer's session has Stripe create one at confirmation. Once
+  // a verified payment has marked the row paid, the route tags that Customer
+  // (metadata.source) so the payer's next payment can reuse it. Only a real
+  // paid flip by this delivery adopts, and adoption never changes the answer
+  // Stripe gets.
+  // -------------------------------------------------------------------------
+  describe('adopting the paying Customer (0.1.17)', () => {
+    async function postPaid(session: Record<string, unknown>, type = 'checkout.session.completed') {
+      const payload = JSON.stringify({
+        id: 'evt_adopt',
+        type,
+        data: { object: { id: 'cs_adopt', amount_total: 2500, currency: 'usd', payment_status: 'paid', ...session } },
+      });
+      const signature = new Stripe('sk_test_dummy').webhooks.generateTestHeaderString({ payload, secret: WEBHOOK_SECRET });
+      return POST(makeCtx(payload, { 'stripe-signature': signature }));
+    }
+
+    it('tags session.customer with the package source once the handler reports this delivery marked the row paid', async () => {
+      handleInboundPaymentMock.mockResolvedValueOnce({ status: 200, markedPaid: true });
+
+      const res = await postPaid({ customer: 'cus_PAYER', customer_details: { email: 'payer@example.com' } });
+
+      expect(res.status).toBe(200);
+      expect(customersUpdate()).toHaveBeenCalledTimes(1);
+      expect(customersUpdate()).toHaveBeenCalledWith('cus_PAYER', { metadata: { source: 'cool-astro-forms' } });
+    });
+
+    it('reads the id off an expanded customer object', async () => {
+      handleInboundPaymentMock.mockResolvedValueOnce({ status: 200, markedPaid: true });
+
+      await postPaid({ customer: { id: 'cus_EXPANDED', object: 'customer' } });
+
+      expect(customersUpdate()).toHaveBeenCalledWith('cus_EXPANDED', { metadata: { source: 'cool-astro-forms' } });
+    });
+
+    it('verifies and adopts with ONE client for the delivery', async () => {
+      handleInboundPaymentMock.mockResolvedValueOnce({ status: 200, markedPaid: true });
+
+      await postPaid({ customer: 'cus_PAYER' });
+
+      expect(getStripeClient).toHaveBeenCalledTimes(1);
+    });
+
+    it('also adopts on checkout.session.async_payment_succeeded (a delayed method that settles later)', async () => {
+      handleInboundPaymentMock.mockResolvedValueOnce({ status: 200, markedPaid: true });
+
+      await postPaid({ customer: 'cus_ASYNC' }, 'checkout.session.async_payment_succeeded');
+
+      expect(customersUpdate()).toHaveBeenCalledWith('cus_ASYNC', { metadata: { source: 'cool-astro-forms' } });
+    });
+
+    // A duplicate delivery, an unpaid session and a session for another
+    // amount all reach the handler, which records them without marking the
+    // row paid. None of them is a verified payment by this Customer.
+    it('adopts nothing when the handler did not mark the row paid (duplicate, unpaid or mismatched session)', async () => {
+      handleInboundPaymentMock.mockResolvedValueOnce({ status: 200, markedPaid: false });
+
+      const res = await postPaid({ customer: 'cus_NOT_PAID', payment_status: 'unpaid' });
+
+      expect(res.status).toBe(200);
+      expect(customersUpdate()).not.toHaveBeenCalled();
+    });
+
+    it('adopts nothing when the handler failed (500), and the 500 still reaches Stripe so it retries', async () => {
+      handleInboundPaymentMock.mockResolvedValueOnce({ status: 500, markedPaid: false });
+
+      const res = await postPaid({ customer: 'cus_PAYER' });
+
+      expect(res.status).toBe(500);
+      expect(customersUpdate()).not.toHaveBeenCalled();
+    });
+
+    it('adopts nothing for a guest checkout (no customer on the session)', async () => {
+      handleInboundPaymentMock.mockResolvedValueOnce({ status: 200, markedPaid: true });
+
+      await postPaid({ customer: null });
+
+      expect(customersUpdate()).not.toHaveBeenCalled();
+    });
+
+    it('a failed adoption never changes the answer: still 200, logged as stripe.customer-adopt-failed without the customer id or email', async () => {
+      handleInboundPaymentMock.mockResolvedValueOnce({ status: 200, markedPaid: true });
+      customersUpdate().mockRejectedValueOnce(
+        Object.assign(new Error('No such customer: cus_GONE (payer@example.com)'), {
+          type: 'StripeInvalidRequestError',
+          statusCode: 404,
+        }),
+      );
+
+      const res = await postPaid({ customer: 'cus_GONE', customer_details: { email: 'payer@example.com' } });
+
+      expect(res.status).toBe(200);
+      expect(logError).toHaveBeenCalledWith('stripe.customer-adopt-failed', expect.any(Error), {
+        eventId: 'evt_adopt',
+        statusCode: 404,
+      });
+      const logged = JSON.stringify(
+        [...vi.mocked(log).mock.calls, ...vi.mocked(logError).mock.calls],
+        (_key, value: unknown) => (value instanceof Error ? { message: value.message } : value),
+      );
+      expect(logged).not.toContain('cus_GONE');
+      expect(logged).not.toContain('payer@example.com');
+    });
+
+    it('a non-settling event type never adopts', async () => {
+      const payload = JSON.stringify({ id: 'evt_refund', type: 'charge.refunded', data: { object: { customer: 'cus_X' } } });
+      const signature = new Stripe('sk_test_dummy').webhooks.generateTestHeaderString({ payload, secret: WEBHOOK_SECRET });
+
+      const res = await POST(makeCtx(payload, { 'stripe-signature': signature }));
+
+      expect(res.status).toBe(200);
+      expect(customersUpdate()).not.toHaveBeenCalled();
+    });
   });
 
   it('a bad signature resolves 400 "Webhook Error" and NEVER calls handleInboundPayment (no DB write)', async () => {

@@ -451,6 +451,88 @@ export function runStorageContract(makeAdapter: () => StorageAdapter): void {
         expect(afterSecond[0]?.status).toBe('paid');
       });
 
+      // 0.1.17: a paid Stripe payment records which Stripe Customer and payer
+      // email it belongs to, so repeat payers are traceable from the admin.
+      it('a payment nobody gave customer data reads back with customerRef and payerEmail undefined (rows that predate 0.1.17 are untouched)', async () => {
+        const entry = await adapter.createEntry(entryInput());
+        await adapter.attachPayment(entry.id, {
+          provider: 'stripe',
+          amountCents: 500,
+          currency: 'usd',
+          status: 'link_created',
+          providerRef: 'cs_nocust_1',
+        });
+
+        const [payment] = await adapter.getPaymentsByEntry(entry.id);
+        expect(payment?.customerRef).toBeUndefined();
+        expect(payment?.payerEmail).toBeUndefined();
+        expect((await adapter.getPaymentByProviderRef('cs_nocust_1'))?.customerRef).toBeUndefined();
+      });
+
+      it('updatePayment persists customerRef and payerEmail, and a later patch that omits them leaves them in place', async () => {
+        const entry = await adapter.createEntry(entryInput());
+        await adapter.attachPayment(entry.id, {
+          provider: 'stripe',
+          amountCents: 500,
+          currency: 'usd',
+          status: 'link_created',
+          providerRef: 'cs_cust_1',
+        });
+        const [payment] = await adapter.getPaymentsByEntry(entry.id);
+
+        const updated = await adapter.updatePayment(payment!.id, {
+          customerRef: 'cus_ABC123',
+          payerEmail: 'payer@example.com',
+        });
+        expect(updated.customerRef).toBe('cus_ABC123');
+        expect(updated.payerEmail).toBe('payer@example.com');
+
+        // An unrelated patch (a refund flip, an admin edit) must not blank them:
+        // updatePayment is read-merge-write over every column.
+        await adapter.updatePayment(payment!.id, { status: 'refunded' });
+        const reread = await adapter.getPaymentByProviderRef('cs_cust_1');
+        expect(reread?.status).toBe('refunded');
+        expect(reread?.customerRef).toBe('cus_ABC123');
+        expect(reread?.payerEmail).toBe('payer@example.com');
+        expect((await adapter.listPayments({}))[0]?.payerEmail).toBe('payer@example.com');
+      });
+
+      it('appendPaymentEventIfAbsent writes customerRef and payerEmail in the same atomic patch as the paid flip; a replayed eventId returns false and never overwrites them', async () => {
+        const entry = await adapter.createEntry(entryInput());
+        await adapter.attachPayment(entry.id, {
+          provider: 'stripe',
+          amountCents: 500,
+          currency: 'usd',
+          status: 'link_created',
+          providerRef: 'cs_cust_atomic',
+        });
+        const [payment] = await adapter.getPaymentsByEntry(entry.id);
+
+        const first = await adapter.appendPaymentEventIfAbsent(
+          payment!.id,
+          'evt_cust_1',
+          { id: 'evt_cust_1', type: 'checkout.session.completed', at: 1000 },
+          { status: 'paid', customerRef: 'cus_FIRST', payerEmail: 'first@example.com' },
+        );
+        expect(first).toBe(true);
+        const afterFirst = await adapter.getPaymentByProviderRef('cs_cust_atomic');
+        expect(afterFirst?.status).toBe('paid');
+        expect(afterFirst?.customerRef).toBe('cus_FIRST');
+        expect(afterFirst?.payerEmail).toBe('first@example.com');
+
+        const replay = await adapter.appendPaymentEventIfAbsent(
+          payment!.id,
+          'evt_cust_1',
+          { id: 'evt_cust_1', type: 'checkout.session.completed', at: 2000 },
+          { status: 'paid', customerRef: 'cus_SECOND', payerEmail: 'second@example.com' },
+        );
+        expect(replay).toBe(false);
+        const afterReplay = await adapter.getPaymentByProviderRef('cs_cust_atomic');
+        expect(afterReplay?.customerRef).toBe('cus_FIRST');
+        expect(afterReplay?.payerEmail).toBe('first@example.com');
+        expect(afterReplay?.events).toHaveLength(1);
+      });
+
       it('listPayments/countPayments filter by status and by entryId; countPayments agrees with listPayments length', async () => {
         const entryA = await adapter.createEntry(entryInput());
         const entryB = await adapter.createEntry(entryInput({ formId: 'form-2' }));

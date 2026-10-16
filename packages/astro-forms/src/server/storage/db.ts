@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { MIGRATIONS } from './migrations.js';
+import { MIGRATIONS, applyMigrations } from './migrations.js';
 import { log } from '../log.js';
 
 const dbCache = new Map<string, Database.Database>();
@@ -68,14 +68,9 @@ export function getDb(dbPath?: string): Database.Database {
     if (process.env.NODE_ENV === 'production' && resolvedPath !== ':memory:') {
       backupBeforeMigration(db, resolvedPath, currentVersion);
     }
-    for (let v = currentVersion; v < MIGRATIONS.length; v++) {
-      const migration = MIGRATIONS[v];
-      if (!migration) throw new Error(`missing migration at index ${v}`);
-      db.transaction(() => {
-        migration(db);
-        db.pragma(`user_version = ${v + 1}`);
-      })();
-    }
+    // Re-reads the version under the write lock per block (another process
+    // may have migrated since the read above) — see applyMigrations.
+    applyMigrations(db);
   }
 
   const journalMode = db.pragma('journal_mode', { simple: true }) as string;

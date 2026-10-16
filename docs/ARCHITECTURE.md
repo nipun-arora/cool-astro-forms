@@ -129,13 +129,17 @@ HOST ASTRO SITE (output:'server', @astrojs/node middleware, optional Express/Pas
 │         appendPaymentEventIfAbsent; Phase 4 adds getFilesByEntry/findRecoverableEntries/markConsent/
 │         markRecoverySent(atomic claim)/suppressRecovery/isRecoverySuppressed)
 │         SqliteStorage: WAL + busy_timeout, BEGIN IMMEDIATE transactions, prepared statements only,
-│         additive-only user_version migrations + boot guard (newer-schema refuses) + prod pre-migration
+│         additive-only user_version migrations (0.1.17: SQLite and Turso apply each block + its user_version bump in
+│         ONE transaction, skip an ADD COLUMN a crashed run already applied, and two concurrent runners both finish
+│         cleanly — migrations.ts applyMigrations/migrationStatements) + boot guard (newer-schema refuses) + prod pre-migration
 │         VACUUM INTO backup (retain 3, apostrophe-escaped path), journal_mode logged at boot
 │         Schema: entries (site_id, form_id, status CHECK[abandoned/submitted/converted/spam], fields/geo/
 │         journey JSON, visitor_uuid, ip, ua, last_field, page_url, referrer, timestamps; Phase 4:
 │         consent_at/recovery_sent_at (v4 migration, additive); dedupe idx site+visitor+form+status+updated,
 │         status_created idx, Phase 4: idx_entries_recovery) · payments (entry_id NOT NULL, provider,
-│         amount_cents, currency, status CHECK, pay_link_url, provider_ids/events JSON; Phase 3: provider_ref idx)
+│         amount_cents, currency, status CHECK, pay_link_url, provider_ids/events JSON; Phase 3: provider_ref idx;
+│         0.1.17 v6 migration, additive: nullable customer_ref (Stripe cus_…) + payer_email, written by the Stripe
+│         webhook in the same atomic patch as the paid flip)
 │         · files (Phase 4: real upload records — filename/sizeBytes/mime/storage[drive|email-only]/
 │         driveFileId/driveLink, populated by attachFiles from recordSubmission's Drive outcome) ·
 │         form_starts (unique visitor+form+site) · recovery_suppressions (Phase 4, v4 — visitor_uuid +

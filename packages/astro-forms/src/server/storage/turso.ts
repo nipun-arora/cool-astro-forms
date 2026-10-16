@@ -101,7 +101,7 @@ import type {
   PaymentStatus,
 } from '../../types.js';
 import { PAYMENT_REQUEST_FORM_ID } from '../payment-constants.js';
-import { MIGRATION_SQL } from './migrations.js';
+import { COLUMN_EXISTS_SQL, MIGRATION_SQL, addedColumn, migrationStatements } from './migrations.js';
 import { csvCell } from './csv.js';
 import { logError } from '../log.js';
 
@@ -198,6 +198,9 @@ interface RawPaymentRow {
   provider_ref: string | null;
   provider_ids: string | null;
   events: string | null;
+  // 0.1.17 (migration v6): Stripe customer + payer email, set by the paid webhook.
+  customer_ref: string | null;
+  payer_email: string | null;
   created_at: number | null;
   updated_at: number | null;
 }
@@ -215,6 +218,8 @@ function mapPaymentRow(row: RawPaymentRow): Payment | undefined {
       providerRef: row.provider_ref ?? undefined,
       providerIds: row.provider_ids !== null ? (JSON.parse(row.provider_ids) as Record<string, unknown>) : undefined,
       events: row.events !== null ? (JSON.parse(row.events) as PaymentEvent[]) : undefined,
+      customerRef: row.customer_ref ?? undefined,
+      payerEmail: row.payer_email ?? undefined,
       createdAt: row.created_at ?? 0,
       updatedAt: row.updated_at ?? 0,
     };
@@ -368,26 +373,56 @@ async function connectAndMigrate(dbUrl: string, authToken?: string): Promise<Cli
   return client;
 }
 
+async function readUserVersion(client: Client): Promise<number> {
+  const row = firstRow<{ user_version: number }>(await client.execute('PRAGMA user_version'));
+  return row ? Number(row.user_version) : 0;
+}
+
 /**
  * Applies `MIGRATION_SQL` (the same dialect-neutral list `db.ts` walks for
  * better-sqlite3, migrations.ts) against `user_version` — one shared source
- * of DDL, two backends. `executeMultiple` runs each versioned SQL block
- * un-transacted (matches better-sqlite3's `db.exec`, which is also not
- * itself wrapped in an explicit transaction per block in db.ts beyond the
- * per-migration `db.transaction()` call there); here each block is applied
- * then its `user_version` bump is written before moving to the next.
+ * of DDL, two backends. Runs on every cold start, so an up-to-date database
+ * costs one `PRAGMA user_version` read and nothing else.
+ *
+ * Each pending block goes out as ONE `client.batch(..., 'write')` (BEGIN
+ * IMMEDIATE … COMMIT, a single round trip on remote Turso, synchronous on
+ * the local backend so it never yields mid-transaction): a version guard,
+ * the block's statements, then the `user_version` bump — all or nothing,
+ * so a process that dies mid-block leaves no half-applied DDL behind
+ * (0.1.17 audit). A batch cannot branch on a read, so the guard is a
+ * statement that FAILS unless `user_version` still equals the version this
+ * runner planned from (`json()` rejects 'stale' as malformed JSON): a
+ * runner that lost a cold-start race rolls back instead of re-running the
+ * block or rewinding a version another runner already moved past, then
+ * re-reads and carries on from wherever the winner left it. ADD COLUMN
+ * statements whose column already exists (a database the pre-0.1.17
+ * un-transacted runner left half-way through a block) are dropped from the
+ * plan as already applied. Any other failure with the version unmoved is a
+ * real migration error and is thrown.
  */
 async function migrate(client: Client): Promise<void> {
-  const current = await client.execute('PRAGMA user_version');
-  const row = firstRow<{ user_version: number }>(current);
-  let version = row ? Number(row.user_version) : 0;
+  for (;;) {
+    const version = await readUserVersion(client);
+    if (version >= MIGRATION_SQL.length) return;
+    const sql = MIGRATION_SQL[version];
+    if (sql === undefined) throw new Error('missing migration at index ' + version);
 
-  for (let v = version; v < MIGRATION_SQL.length; v++) {
-    const sql = MIGRATION_SQL[v];
-    if (!sql) throw new Error('missing migration at index ' + v);
-    await client.executeMultiple(sql);
-    await client.execute('PRAGMA user_version = ' + String(v + 1));
-    version = v + 1;
+    const statements: InStatement[] = [
+      { sql: "SELECT json(CASE WHEN user_version = ? THEN '0' ELSE 'stale' END) FROM pragma_user_version", args: [version] },
+    ];
+    for (const statement of migrationStatements(sql)) {
+      const added = addedColumn(statement);
+      if (added && firstRow(await client.execute({ sql: COLUMN_EXISTS_SQL, args: [added.table, added.column] }))) continue;
+      statements.push(statement);
+    }
+    statements.push('PRAGMA user_version = ' + String(version + 1));
+
+    try {
+      await retryOnLock(() => client.batch(statements, 'write'));
+    } catch (err) {
+      if ((await readUserVersion(client)) > version) continue;
+      throw err;
+    }
   }
 }
 
@@ -900,11 +935,13 @@ export class TursoStorage implements StorageAdapter {
       merged.providerRef ?? null,
       merged.providerIds !== undefined ? JSON.stringify(merged.providerIds) : null,
       merged.events !== undefined ? JSON.stringify(merged.events) : null,
+      merged.customerRef ?? null,
+      merged.payerEmail ?? null,
       merged.updatedAt,
       id,
     ];
     await exec.execute({
-      sql: `UPDATE payments SET provider=?, amount_cents=?, currency=?, status=?, pay_link_url=?, provider_ref=?, provider_ids=?, events=?, updated_at=?
+      sql: `UPDATE payments SET provider=?, amount_cents=?, currency=?, status=?, pay_link_url=?, provider_ref=?, provider_ids=?, events=?, customer_ref=?, payer_email=?, updated_at=?
             WHERE id=?`,
       args,
     });

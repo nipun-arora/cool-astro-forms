@@ -34,20 +34,57 @@
  * itself also refuses a second row for the same session, so a client that
  * exposes no response headers cannot produce a twin either.
  *
+ * Customer attribution (0.1.17): through 0.1.16 only `customer_email` was
+ * sent and no Customer was ever created, so Stripe recorded a guest checkout.
+ * The email is only ever LOOKED UP (`findReusableStripeCustomer`; the
+ * lifecycle is in customers.ts): a payer whose earlier payment the webhook
+ * adopted gets that Customer (`customer: <id>`), so a repeat payer's payments
+ * share one Customer. Otherwise (a new payer, no email, or a failed lookup,
+ * which never blocks the payment) the session sends `customer_creation:
+ * 'always'` plus the normalized `customer_email`, and Stripe creates the
+ * Customer only when the payer confirms. The package never creates or writes
+ * a Customer, so a refused or abandoned call leaves nothing behind, and
+ * `customerName` is validated but not sent (Checkout collects the payer's own
+ * name). A session with `customer` turns card saving off
+ * (`saved_payment_method_options.payment_method_save: 'disabled'`), so
+ * Checkout never prefills a stored card for whoever holds the link, and the
+ * session is card-only, so a Customer's cash balance can never pay it.
+ *
+ * The lookup outcome is part of the request, so a reused key can meet a
+ * different customer shape: the first call found no Customer (session sent
+ * `customer_creation` + `customer_email`) and the retry finds one (it would
+ * send `customer`), typically because the payer paid in between and the
+ * webhook adopted the Customer Stripe made, or because the first lookup
+ * failed. Stripe refuses a reused key whose params differ
+ * (`StripeIdempotencyError`, raw type `idempotency_error`) instead of
+ * replaying, so on that refusal a call that has a Customer id resends ONCE
+ * in the no-Customer shape under the same key; Stripe then replays the
+ * first session and the replay rules above apply (the Customer this call
+ * resolved stays unused until the next payment). The reverse cannot be
+ * repaired: when the first session carried `customer` and this call finds
+ * none (its lookup failed, or the Customer has since gained a card or been
+ * deleted), there is no id to resend, so the call answers `provider-error`
+ * and changes nothing; the same key works again once the lookup does. A key
+ * genuinely reused for different params mismatches in both shapes and also
+ * ends in `provider-error`.
+ *
  * Clean-room: written against docs.stripe.com/api/checkout/sessions (create,
- * expire), not derived from any commercial form-plugin source.
+ * expire), docs.stripe.com/api/customers and docs.stripe.com/api/idempotent_requests,
+ * not derived from any commercial form-plugin source.
  */
 import type Stripe from 'stripe';
 import { z } from 'zod';
 import { log, logError } from '../log.js';
 import type { StorageAdapter } from '../storage/adapter.js';
 import { getStorageAdapter } from '../storage/index.js';
+import { findReusableStripeCustomer, isIdempotentReplay } from './customers.js';
 
 /** Stripe's documented Checkout Session expiry window: 30 minutes to 24 hours after creation. */
 const MIN_EXPIRY_MS = 30 * 60_000;
 const MAX_EXPIRY_MS = 24 * 60 * 60_000;
 /** Stripe rejects idempotency keys longer than 255 characters. */
 const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
+const MAX_CUSTOMER_NAME_LENGTH = 200;
 
 export interface CreateCheckoutForEntryInput {
   /** The entry the payment belongs to (from `recordSubmission`, or an admin page's `?entry=`). Must exist. */
@@ -60,8 +97,21 @@ export interface CreateCheckoutForEntryInput {
   amountCents: number;
   /** ISO 4217 code, any case (sent and stored lowercase). */
   currency: string;
-  /** Pre-fills the Checkout email field; Stripe sends its receipt there when receipts are on in the dashboard. */
+  /**
+   * The payer's email. Matched (case and spacing ignored) to the Stripe
+   * Customer an earlier verified payment by this address created, so repeat
+   * payments share one Customer; otherwise it pre-fills the Checkout email
+   * field and becomes the email of the Customer Stripe creates when the payer
+   * confirms. Stripe sends its receipt there when receipts are on in the
+   * dashboard.
+   */
   customerEmail?: string;
+  /**
+   * The payer's name (up to 200 characters). Validated and accepted for API
+   * compatibility, but not sent to Stripe since 0.1.17: Checkout collects
+   * the payer's own name.
+   */
+  customerName?: string;
   /** When the link stops working. Between 30 minutes and 24 hours from now (Stripe's limits); 23 hours is a safe default. */
   expiresAt: Date;
   /** Absolute http(s) URL; passed to Stripe verbatim (`{CHECKOUT_SESSION_ID}` templating works). */
@@ -105,7 +155,13 @@ export type CreateCheckoutForEntryErrorCode =
   | 'storage-error'
   /** No entry has `entryId`. Nothing was created. */
   | 'entry-not-found'
-  /** Stripe refused or failed the create (or returned no hosted URL). No row was written. */
+  /**
+   * Stripe refused or failed the create (or returned no hosted URL). No row
+   * was written. Also returned when a reused `idempotencyKey`'s first
+   * request was attributed to a Customer this call could not look up (Stripe
+   * then refuses the changed params); retrying with the same key once Stripe
+   * is reachable gets the first session.
+   */
   | 'provider-error'
   /** The session was created but its payments row could not be written; the session was expired (see `sessionExpired`). */
   | 'record-failed'
@@ -143,6 +199,16 @@ function fail(code: CreateCheckoutForEntryErrorCode, message: string, extra: { s
   return { ok: false, code, message, ...extra };
 }
 
+/**
+ * True for Stripe's refusal of a reused idempotency key whose params differ
+ * from the first request's: stripe-node raises `StripeIdempotencyError`
+ * (`type`) for an API error of raw type `idempotency_error` (`rawType`).
+ */
+function isIdempotencyMismatch(err: unknown): boolean {
+  const { type, rawType } = (err ?? {}) as { type?: unknown; rawType?: unknown };
+  return type === 'StripeIdempotencyError' || rawType === 'idempotency_error';
+}
+
 function isHttpUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -150,24 +216,6 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * True when Stripe answered with a replay of an earlier request's response
- * (`Idempotent-Replayed: true`). stripe-node puts the raw response on a
- * non-enumerable `lastResponse`: its `headers` are a plain lowercase object
- * from the Node HTTP client and a fetch `Headers` from the fetch client.
- * Anything else (an injected client with no response metadata) reads as a
- * fresh create.
- */
-function isIdempotentReplay(session: unknown): boolean {
-  const headers = (session as { lastResponse?: { headers?: unknown } } | null)?.lastResponse?.headers;
-  if (!headers || typeof headers !== 'object') return false;
-  const value =
-    typeof (headers as { get?: unknown }).get === 'function'
-      ? (headers as Headers).get('idempotent-replayed')
-      : (headers as Record<string, unknown>)['idempotent-replayed'];
-  return typeof value === 'string' && value.trim().toLowerCase() === 'true';
 }
 
 /** Returns an error message for the first invalid field, or undefined when the input is usable. */
@@ -181,6 +229,12 @@ function validate(input: CreateCheckoutForEntryInput, now: number): string | und
   }
   if (input.customerEmail !== undefined && !z.email().safeParse(input.customerEmail).success) {
     return 'customerEmail is not a valid email address';
+  }
+  if (
+    input.customerName !== undefined &&
+    (typeof input.customerName !== 'string' || input.customerName.length > MAX_CUSTOMER_NAME_LENGTH)
+  ) {
+    return `customerName must be a string of at most ${MAX_CUSTOMER_NAME_LENGTH} characters`;
   }
   if (!(input.expiresAt instanceof Date) || Number.isNaN(input.expiresAt.getTime())) {
     return 'expiresAt must be a valid Date';
@@ -235,32 +289,58 @@ export async function createCheckoutForEntry(
     return fail('storage-error', 'the entry could not be read');
   }
 
+  // After the entry check, so a refused call never reaches Stripe. The
+  // lookup only reads, and the same email resolves the same way, so a
+  // replayed request (same idempotencyKey) normally sends identical params;
+  // when one call found a Customer and the other did not, the create below
+  // repairs it.
+  const customerEmail = input.customerEmail?.trim().toLowerCase() || undefined;
+  const customerId = customerEmail ? await findReusableStripeCustomer({ email: customerEmail }, client) : undefined;
+
   const metadata = { ...(input.metadata ?? {}), entry_id: entryId };
+  /** One builder for both customer shapes, so a resend differs from the first request only in the customer fields. */
+  const sessionParams = (customer: string | undefined): Stripe.Checkout.SessionCreateParams => ({
+    mode: 'payment',
+    payment_method_types: ['card'],
+    line_items: [
+      {
+        price_data: {
+          currency,
+          unit_amount: input.amountCents,
+          product_data: { name: input.productName || 'Payment' },
+        },
+        quantity: 1,
+      },
+    ],
+    // Stripe rejects `customer_creation` or `customer_email` together with
+    // `customer`. With a Customer, card saving stays off so Checkout never
+    // redisplays a card; without one, Stripe creates it when the payer
+    // confirms.
+    ...(customer
+      ? { customer, saved_payment_method_options: { payment_method_save: 'disabled' as const } }
+      : {
+          customer_creation: 'always' as const,
+          ...(customerEmail ? { customer_email: customerEmail } : {}),
+        }),
+    client_reference_id: entryId,
+    expires_at: Math.floor(input.expiresAt.getTime() / 1000),
+    success_url: input.successUrl,
+    cancel_url: input.cancelUrl,
+    metadata,
+    payment_intent_data: { metadata, description: input.productName || 'Payment' },
+  });
+  const createSession = (customer: string | undefined) =>
+    client.checkout.sessions.create(sessionParams(customer), { idempotencyKey: input.idempotencyKey });
+
   let session: Stripe.Checkout.Session;
   try {
-    session = await client.checkout.sessions.create(
-      {
-        mode: 'payment',
-        payment_method_types: ['card'],
-        line_items: [
-          {
-            price_data: {
-              currency,
-              unit_amount: input.amountCents,
-              product_data: { name: input.productName || 'Payment' },
-            },
-            quantity: 1,
-          },
-        ],
-        ...(input.customerEmail ? { customer_email: input.customerEmail } : {}),
-        expires_at: Math.floor(input.expiresAt.getTime() / 1000),
-        success_url: input.successUrl,
-        cancel_url: input.cancelUrl,
-        metadata,
-        payment_intent_data: { metadata },
-      },
-      { idempotencyKey: input.idempotencyKey },
-    );
+    session = await createSession(customerId).catch((err: unknown) => {
+      // The key's first request was sent without a Customer (its lookup
+      // failed). Resend in that shape, once, so Stripe replays its session.
+      if (!customerId || !isIdempotencyMismatch(err)) throw err;
+      log('checkout-for-entry.customer-shape-resend', { entryId });
+      return createSession(undefined);
+    });
   } catch (err) {
     logError('checkout-for-entry.provider-failed', err, { entryId });
     return fail('provider-error', 'Stripe did not create the checkout session');

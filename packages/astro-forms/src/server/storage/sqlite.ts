@@ -123,6 +123,9 @@ interface RawPaymentRow {
   provider_ref: string | null;
   provider_ids: string | null;
   events: string | null;
+  // 0.1.17 (migration v6): Stripe customer + payer email, set by the paid webhook.
+  customer_ref: string | null;
+  payer_email: string | null;
   created_at: number | null;
   updated_at: number | null;
 }
@@ -141,6 +144,8 @@ function mapPaymentRow(row: RawPaymentRow): Payment | undefined {
       providerRef: row.provider_ref ?? undefined,
       providerIds: row.provider_ids !== null ? (JSON.parse(row.provider_ids) as Record<string, unknown>) : undefined,
       events: row.events !== null ? (JSON.parse(row.events) as PaymentEvent[]) : undefined,
+      customerRef: row.customer_ref ?? undefined,
+      payerEmail: row.payer_email ?? undefined,
       createdAt: row.created_at ?? 0,
       updatedAt: row.updated_at ?? 0,
     };
@@ -740,7 +745,7 @@ export class SqliteStorage implements StorageAdapter {
   private updatePaymentRow(id: string, merged: Payment): void {
     this.db
       .prepare(
-        `UPDATE payments SET provider=?, amount_cents=?, currency=?, status=?, pay_link_url=?, provider_ref=?, provider_ids=?, events=?, updated_at=?
+        `UPDATE payments SET provider=?, amount_cents=?, currency=?, status=?, pay_link_url=?, provider_ref=?, provider_ids=?, events=?, customer_ref=?, payer_email=?, updated_at=?
          WHERE id=?`,
       )
       .run(
@@ -752,6 +757,8 @@ export class SqliteStorage implements StorageAdapter {
         merged.providerRef ?? null,
         merged.providerIds !== undefined ? JSON.stringify(merged.providerIds) : null,
         merged.events !== undefined ? JSON.stringify(merged.events) : null,
+        merged.customerRef ?? null,
+        merged.payerEmail ?? null,
         merged.updatedAt,
         id,
       );

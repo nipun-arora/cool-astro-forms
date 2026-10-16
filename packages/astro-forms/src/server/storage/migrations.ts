@@ -13,13 +13,24 @@
  * migrate data forward in application code instead of altering the old one.
  *
  * DIALECT-NEUTRAL EXTRACTION (Phase 5, Plan 02): `MIGRATION_SQL` is the
- * single source of the raw DDL, identical SQLite dialect across v1..v5.
- * `MIGRATIONS` (the better-sqlite3 function array `getDb()`/db.ts walks) is
- * mechanically derived from it — each entry just does `db.exec(sql)`, so
- * db.ts's boot/migration semantics are byte-for-byte unchanged. This is the
- * source 05-03's Turso adapter walks via `client.executeMultiple` inside its
- * `#ready` gate — one list of migration SQL, both backends apply it against
- * `user_version`.
+ * single source of the raw DDL, identical SQLite dialect across v1..v6.
+ * `MIGRATIONS` (the better-sqlite3 function array `applyMigrations()` walks
+ * for db.ts) is mechanically derived from it, and 05-03's Turso adapter
+ * walks the same list inside its `#ready` gate — one list of migration SQL,
+ * both backends apply it against `user_version`.
+ *
+ * ATOMIC + RE-RUNNABLE (0.1.17 audit): both runners apply each block and
+ * its `user_version` bump as ONE write transaction that re-reads the
+ * version under the write lock, so a crash mid-block leaves nothing behind
+ * and a second runner that read the old version just before the first one
+ * committed finds the block done instead of re-running it. Each block is
+ * split into statements (`migrationStatements`) so an `ALTER TABLE … ADD
+ * COLUMN` whose column already exists can be skipped as applied: databases
+ * the pre-0.1.17 Turso runner left half-way through a block (it ran blocks
+ * un-transacted) then boot instead of failing on "duplicate column name"
+ * forever. The split strips `--` comments and then splits on `;`, so
+ * MIGRATION_SQL must never put `--` or `;` inside a string literal (guarded
+ * by sqlite.test.ts, which rebuilds the schema statement by statement).
  */
 import type Database from 'better-sqlite3';
 
@@ -158,6 +169,64 @@ export const MIGRATION_SQL: string[] = [
       last_refill_ms INTEGER NOT NULL
     );
   `,
+
+  // v6 — Stripe customer visibility (0.1.17): which Stripe Customer and which
+  // payer email a paid payment belongs to, written by the Stripe webhook in
+  // the same atomic patch as the paid flip, so repeat payers are recognisable
+  // in the admin and the operator can jump to the customer in Stripe.
+  // Additive-only per the policy above: two nullable columns, nothing renamed
+  // or dropped, no CHECK touched. Existing rows keep NULL in both. No index:
+  // nothing queries by either column yet (the admin only displays them).
+  `
+    ALTER TABLE payments ADD COLUMN customer_ref TEXT;
+    ALTER TABLE payments ADD COLUMN payer_email TEXT;
+  `,
 ];
 
-export const MIGRATIONS: Migration[] = MIGRATION_SQL.map((sql) => (db: Database.Database) => db.exec(sql));
+/** One block's statements, in order: `--` comments stripped first (several contain a `;`), then split on `;`. */
+export function migrationStatements(sql: string): string[] {
+  return sql
+    .replace(/--[^\n]*/g, '')
+    .split(';')
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+}
+
+/** `{ table, column }` when `statement` is an `ALTER TABLE <t> ADD [COLUMN] <c>` (unquoted names, as every block writes them), else undefined. */
+export function addedColumn(statement: string): { table: string; column: string } | undefined {
+  const match = /^ALTER\s+TABLE\s+(\w+)\s+ADD\s+(?:COLUMN\s+)?(\w+)/i.exec(statement);
+  return match ? { table: match[1]!, column: match[2]! } : undefined;
+}
+
+/** Bound-arg existence check for `addedColumn`'s result — SQLite compares column names case-insensitively, so this does too. */
+export const COLUMN_EXISTS_SQL = 'SELECT 1 FROM pragma_table_info(?) WHERE name = ? COLLATE NOCASE';
+
+export const MIGRATIONS: Migration[] = MIGRATION_SQL.map((sql) => (db: Database.Database) => {
+  for (const statement of migrationStatements(sql)) {
+    const added = addedColumn(statement);
+    if (added && db.prepare(COLUMN_EXISTS_SQL).get(added.table, added.column) !== undefined) continue;
+    db.exec(statement);
+  }
+});
+
+/**
+ * better-sqlite3 runner (db.ts). Each pass is its own BEGIN IMMEDIATE
+ * transaction: read `user_version` under the write lock, apply that one
+ * block, bump the version, commit. A runner that lost the race to the write
+ * lock reads the bumped version and stops; it never trusts a version it
+ * read before taking the lock.
+ */
+export function applyMigrations(db: Database.Database): void {
+  const applyNext = db.transaction((): boolean => {
+    const version = db.pragma('user_version', { simple: true }) as number;
+    if (version >= MIGRATIONS.length) return false;
+    const migration = MIGRATIONS[version];
+    if (!migration) throw new Error(`missing migration at index ${version}`);
+    migration(db);
+    db.pragma(`user_version = ${version + 1}`);
+    return true;
+  });
+  while (applyNext.immediate()) {
+    // one block per transaction until the version is current
+  }
+}

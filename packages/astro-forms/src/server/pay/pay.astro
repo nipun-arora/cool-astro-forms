@@ -36,6 +36,11 @@ const currencyParam = searchParams.get('currency');
 const currency = (currencyParam ?? config.payments.requestPage.allowedCurrencies[0] ?? 'usd').toLowerCase();
 const feeParam = searchParams.get('fee');
 const labelParam = searchParams.get('label');
+// Optional operator-supplied prefill (`?email=&name=`) so a shared payment link
+// can arrive with the client's details already filled in. Rendered through
+// Astro `{}` expressions only (auto-escaped), like every other value here.
+const emailParam = searchParams.get('email') ?? '';
+const nameParam = searchParams.get('name') ?? '';
 const feeLines: FeeLine[] = resolveFeeLines(searchParams, config.payments);
 
 // D2: the amount input stays EDITABLE — this initial breakdown is only the
@@ -104,7 +109,9 @@ const previewFeeLines = feeLines.map((line) => ({
         font-weight: 600;
         font-size: 0.9rem;
       }
-      input[type='number'] {
+      input[type='number'],
+      input[type='email'],
+      input[type='text'] {
         width: 100%;
         padding: 0.6rem 0.75rem;
         font-size: 1rem;
@@ -112,9 +119,19 @@ const previewFeeLines = feeLines.map((line) => ({
         border-radius: 0.35rem;
         box-sizing: border-box;
       }
-      input[type='number']:focus-visible {
+      input[type='number']:focus-visible,
+      input[type='email']:focus-visible,
+      input[type='text']:focus-visible {
         outline: 2px solid #2563eb;
         outline-offset: 1px;
+      }
+      .field {
+        margin-bottom: 1rem;
+      }
+      .field-hint {
+        margin: 0.3rem 0 0;
+        color: #666;
+        font-size: 0.78rem;
       }
       table.breakdown {
         width: 100%;
@@ -253,6 +270,38 @@ const previewFeeLines = feeLines.map((line) => ({
       }
       {labelParam && <p class="memo">{labelParam}</p>}
       <form method="post" action={actionUrl} id="pay-form">
+        <div class="field">
+          <label for="email">Email</label>
+          {/* `type=email` alone accepts `name@gmail`, which the server's zod
+              email check rejects. The pattern (dot + 2+ letter TLD) closes that
+              gap in the browser; `-` is escaped because browsers compile
+              `pattern` with the `v` flag, where a bare `-` in a class is an
+              error. */}
+          <input
+            id="email"
+            name="email"
+            type="email"
+            autocomplete="email"
+            maxlength="254"
+            pattern="[^@\s]+@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}"
+            title="Enter a full email address, like name@example.com"
+            value={emailParam}
+            required
+          />
+          <p
+            id="email-error"
+            role="alert"
+            hidden
+            style="margin:0.3rem 0 0;padding:0.6rem 0.75rem;background:#fef2f2;border:1px solid #fecaca;border-radius:0.35rem;color:#991b1b;font-size:0.9rem;"
+          >
+            That email address does not look right. Please check it and press Pay again.
+          </p>
+          <p class="field-hint">Your receipt goes here.</p>
+        </div>
+        <div class="field">
+          <label for="name">Name (optional)</label>
+          <input id="name" name="name" type="text" autocomplete="name" maxlength="200" value={nameParam} />
+        </div>
         <div>
           <label for="amount">Amount ({currency.toUpperCase()})</label>
           <input id="amount" name="amount" type="number" min="0" step="0.01" value={dollarsValue} required />
@@ -351,15 +400,47 @@ const previewFeeLines = feeLines.map((line) => ({
             body.append(e.submitter.name, e.submitter.value);
           }
           var buttons = form.querySelectorAll('button[type="submit"]');
+          var labels = [];
           for (var i = 0; i < buttons.length; i++) {
+            labels.push(buttons[i].textContent);
             buttons[i].disabled = true;
             buttons[i].textContent = 'Processing...';
           }
           var amount = body.get('amount') || '';
           function bounce(reason, code) {
-            var q = '?error=' + encodeURIComponent(reason) + '&amount=' + encodeURIComponent(amount);
-            if (code && /^[a-z0-9-]+$/.test(code)) q += '&code=' + code;
-            window.location.assign(window.location.pathname + q);
+            // Start from the current query so an operator's ?email=&name=
+            // prefill (and any other param) survives the round trip; only
+            // error/amount/code are overwritten.
+            var q = new URLSearchParams(window.location.search);
+            q.set('error', reason);
+            q.set('amount', amount);
+            if (code && /^[a-z0-9-]+$/.test(code)) q.set('code', code);
+            else q.delete('code');
+            window.location.assign(window.location.pathname + '?' + q.toString());
+          }
+          // The server rejected the email BEFORE the Turnstile check, so the
+          // token is still live: stay on the page, say what is wrong next to
+          // the field, and hand the buttons back instead of reloading.
+          function showEmailError() {
+            for (var j = 0; j < buttons.length; j++) {
+              buttons[j].disabled = false;
+              buttons[j].textContent = labels[j];
+            }
+            var emailInput = document.getElementById('email');
+            var emailError = document.getElementById('email-error');
+            if (emailError) emailError.hidden = false;
+            if (emailInput) {
+              emailInput.setAttribute('aria-invalid', 'true');
+              emailInput.addEventListener(
+                'input',
+                function clear() {
+                  if (emailError) emailError.hidden = true;
+                  emailInput.removeAttribute('aria-invalid');
+                  emailInput.removeEventListener('input', clear);
+                },
+              );
+              emailInput.focus();
+            }
           }
           fetch(form.action, {
             method: 'POST',
@@ -375,6 +456,8 @@ const previewFeeLines = feeLines.map((line) => ({
             .then(function (data) {
               if (data && data.ok && data.url) {
                 window.location.assign(data.url);
+              } else if (data && data.reason === 'invalid-email') {
+                showEmailError();
               } else {
                 bounce((data && data.reason) || 'error', data && data.code);
               }

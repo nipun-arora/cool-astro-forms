@@ -107,7 +107,7 @@ function makeInput(opts: MakeInputOptions = {}) {
   const headers = new Headers();
   headers.set('Origin', opts.origin ?? 'https://example.com');
   return {
-    body: opts.body ?? 'amount=200&currency=usd',
+    body: opts.body ?? 'amount=200&currency=usd&email=payer%40example.com',
     headers,
     ip: opts.ip ?? '203.0.113.5',
   };
@@ -197,7 +197,7 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
   it('verifyTurnstile configured + fails -> 403, reason turnstile, NO entry/session created', async () => {
     const verifyTurnstile = vi.fn(async () => ({ ok: false }));
     const deps = makeDeps({ verifyTurnstile });
-    const result = await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd' }), deps);
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com' }), deps);
 
     expect(result.status).toBe(403);
     expect(JSON.parse(result.body ?? '{}')).toEqual({ ok: false, reason: 'turnstile' });
@@ -212,7 +212,7 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
     headers.set('Origin', 'https://example.com');
     headers.set('Accept', 'application/json');
     const result = await handlePaymentRequest(
-      { body: 'amount=200&currency=usd', headers, ip: '203.0.113.5' },
+      { body: 'amount=200&currency=usd&email=payer%40example.com', headers, ip: '203.0.113.5' },
       deps,
     );
 
@@ -227,7 +227,7 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
   it('a turnstile reject logs Cloudflare error-codes so production failures are diagnosable from the reject line alone', async () => {
     const verifyTurnstile = vi.fn(async () => ({ ok: false, errorCodes: ['timeout-or-duplicate'] }));
     const deps = makeDeps({ verifyTurnstile });
-    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd' }), deps);
+    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com' }), deps);
 
     expect(deps.log).toHaveBeenCalledWith(
       'payment-request.reject',
@@ -243,7 +243,7 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
     headers.set('Accept', 'text/html');
     headers.set('Referer', 'https://example.com/secure/?pay=200');
     const result = await handlePaymentRequest(
-      { body: 'amount=200&currency=usd', headers, ip: '203.0.113.5' },
+      { body: 'amount=200&currency=usd&email=payer%40example.com', headers, ip: '203.0.113.5' },
       deps,
     );
 
@@ -260,7 +260,7 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
     headers.set('Origin', 'https://example.com');
     headers.set('Accept', 'text/html');
     const result = await handlePaymentRequest(
-      { body: 'amount=200&currency=usd', headers, ip: '203.0.113.5' },
+      { body: 'amount=200&currency=usd&email=payer%40example.com', headers, ip: '203.0.113.5' },
       deps,
     );
 
@@ -276,7 +276,7 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
     headers.set('Accept', 'text/html');
     headers.set('Referer', 'https://example.com/secure/?pay=200');
     const result = await handlePaymentRequest(
-      { body: 'amount=200&currency=usd', headers, ip: '203.0.113.5' },
+      { body: 'amount=200&currency=usd&email=payer%40example.com', headers, ip: '203.0.113.5' },
       deps,
     );
 
@@ -292,7 +292,7 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
     headers.set('Accept', 'text/html');
     headers.set('Referer', 'https://evil.example/secure/?pay=200');
     const result = await handlePaymentRequest(
-      { body: 'amount=200&currency=usd', headers, ip: '203.0.113.5' },
+      { body: 'amount=200&currency=usd&email=payer%40example.com', headers, ip: '203.0.113.5' },
       deps,
     );
 
@@ -307,7 +307,7 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
     headers.set('Origin', 'https://example.com');
     headers.set('Accept', 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8');
     const result = await handlePaymentRequest(
-      { body: 'amount=200&currency=usd', headers, ip: '203.0.113.5' },
+      { body: 'amount=200&currency=usd&email=payer%40example.com', headers, ip: '203.0.113.5' },
       deps,
     );
 
@@ -322,7 +322,7 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
     const verifyTurnstile = vi.fn(async () => ({ ok: true }));
     const deps = makeDeps({ verifyTurnstile });
     const result = await handlePaymentRequest(
-      makeInput({ body: 'amount=200&currency=usd&cf-turnstile-response=tok-123' }),
+      makeInput({ body: 'amount=200&currency=usd&cf-turnstile-response=tok-123&email=payer%40example.com' }),
       deps,
     );
 
@@ -333,7 +333,7 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
 
   it('verifyTurnstile undefined (Turnstile off) -> gate skipped, proceeds to checkout', async () => {
     const deps = makeDeps();
-    const result = await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd' }), deps);
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com' }), deps);
 
     expect(result.status).toBe(302);
     expect(deps.storage.createEntry).toHaveBeenCalledTimes(1);
@@ -348,7 +348,7 @@ describe('handlePaymentRequest — Turnstile hard gate', () => {
 describe('handlePaymentRequest — happy path (Stripe)', () => {
   it('creates a synthetic _payment_request entry + link_created payment row and 302s to the Checkout URL', async () => {
     const deps = makeDeps();
-    const result = await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&label=Consulting' }), deps);
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&label=Consulting&email=payer%40example.com' }), deps);
 
     expect(result.status).toBe(302);
     expect(result.location).toBe('https://checkout.stripe.com/session-1');
@@ -388,7 +388,7 @@ describe('handlePaymentRequest — happy path (Stripe)', () => {
   it('a client-sent bogus total/fee field is ignored — breakdown is always recomputed server-side', async () => {
     const deps = makeDeps();
     const result = await handlePaymentRequest(
-      makeInput({ body: 'amount=100&currency=usd&total=999999&totalCents=999999&feeCents=0' }),
+      makeInput({ body: 'amount=100&currency=usd&total=999999&totalCents=999999&feeCents=0&email=payer%40example.com' }),
       deps,
     );
 
@@ -403,6 +403,197 @@ describe('handlePaymentRequest — happy path (Stripe)', () => {
       'entry-1',
       expect.objectContaining({ amountCents: 10300 }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Payer identity. Stripe only attributes repeat payments to a Customer when
+// we hand it an email, so the shipped pay page asks for one. The server
+// contract stays NON-BREAKING for host-owned pay forms that post only
+// amount+currency: a missing/blank email is accepted (no customerEmail is
+// forwarded, so Stripe still creates an anonymous Customer). A PRESENT but
+// garbled address is a payer typo, rejected up front — before any entry or
+// Checkout Session exists — so it never leaves an orphan entry behind.
+// ---------------------------------------------------------------------------
+
+describe('handlePaymentRequest — payer identity (Stripe customer attribution)', () => {
+  function createEntryFields(deps: HandlePaymentRequestDeps): Record<string, unknown> {
+    return (deps.storage.createEntry as ReturnType<typeof vi.fn>).mock.calls[0]![0].fields;
+  }
+
+  it('the payer email reaches createCheckoutSession so Stripe can attribute the payment to a customer', async () => {
+    const deps = makeDeps();
+    const result = await handlePaymentRequest(
+      makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com&name=Ada%20Lovelace' }),
+      deps,
+    );
+
+    expect(result.status).toBe(302);
+    expect(deps.createCheckoutSession).toHaveBeenCalledWith(
+      expect.objectContaining({ customerEmail: 'payer@example.com', customerName: 'Ada Lovelace' }),
+    );
+  });
+
+  it('the email is trimmed before it is forwarded, so stray whitespace cannot create a second Stripe customer for the same payer', async () => {
+    const deps = makeDeps();
+    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&email=%20payer%40example.com%20' }), deps);
+
+    expect(deps.createCheckoutSession).toHaveBeenCalledWith(
+      expect.objectContaining({ customerEmail: 'payer@example.com' }),
+    );
+  });
+
+  it.each([
+    ['missing', 'amount=200&currency=usd'],
+    ['empty', 'amount=200&currency=usd&email='],
+    ['whitespace only', 'amount=200&currency=usd&email=%20%20'],
+  ])(
+    'a Stripe request with a %s email still succeeds (host-owned pay forms post only amount+currency): no customerEmail forwarded, no email stored on the entry',
+    async (_label, body) => {
+      const deps = makeDeps();
+      const result = await handlePaymentRequest(makeInput({ body }), deps);
+
+      expect(result.status).toBe(302);
+      expect(result.location).toBe('https://checkout.stripe.com/session-1');
+      const sessionInput = (deps.createCheckoutSession as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+      expect(sessionInput.customerEmail).toBeUndefined();
+      expect(createEntryFields(deps)).not.toHaveProperty('email');
+    },
+  );
+
+  it.each([
+    ['not an address', 'amount=200&currency=usd&email=not-an-email'],
+    ['no domain', 'amount=200&currency=usd&email=payer%40'],
+    ['oversized', 'amount=200&currency=usd&email=' + 'a'.repeat(300) + '%40example.com'],
+  ])(
+    'a Stripe request with a %s email -> 400 invalid-email BEFORE any entry or Checkout Session exists (no orphan entry, no Stripe call)',
+    async (_label, body) => {
+      const verifyTurnstile = vi.fn(async () => ({ ok: true }));
+      const deps = makeDeps({ verifyTurnstile });
+      const result = await handlePaymentRequest(makeInput({ body }), deps);
+
+      expect(result.status).toBe(400);
+      expect(JSON.parse(result.body ?? '{}')).toEqual({ ok: false, reason: 'invalid-email' });
+      expect(deps.storage.createEntry).not.toHaveBeenCalled();
+      expect(deps.createCheckoutSession).not.toHaveBeenCalled();
+      // Cheap local validation runs before the Cloudflare round trip.
+      expect(verifyTurnstile).not.toHaveBeenCalled();
+    },
+  );
+
+  it('a rejected email is never written to the log (logs go to host stdout)', async () => {
+    const deps = makeDeps();
+    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&email=secret-person%40nope' }), deps);
+
+    const logged = JSON.stringify((deps.log as ReturnType<typeof vi.fn>).mock.calls);
+    expect(logged).toContain('invalid-email');
+    expect(logged).not.toContain('secret-person');
+  });
+
+  it('a successful request never logs the payer email or name', async () => {
+    const deps = makeDeps();
+    await handlePaymentRequest(
+      makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com&name=Ada%20Lovelace' }),
+      deps,
+    );
+
+    const logged = JSON.stringify((deps.log as ReturnType<typeof vi.fn>).mock.calls);
+    expect(logged).not.toContain('payer@example.com');
+    expect(logged).not.toContain('Ada');
+  });
+
+  it('the email and name are stored on the entry so the admin entries view shows who paid', async () => {
+    const deps = makeDeps();
+    await handlePaymentRequest(
+      makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com&name=Ada%20Lovelace' }),
+      deps,
+    );
+
+    expect(createEntryFields(deps)).toMatchObject({
+      email: 'payer@example.com',
+      name: 'Ada Lovelace',
+      amountCents: 20000,
+      source: 'payment-request',
+    });
+  });
+
+  it('name is optional: omitting it still succeeds, forwards no customerName and stores no name', async () => {
+    const deps = makeDeps();
+    const result = await handlePaymentRequest(makeInput(), deps);
+
+    expect(result.status).toBe(302);
+    const sessionInput = (deps.createCheckoutSession as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(sessionInput.customerEmail).toBe('payer@example.com');
+    expect(sessionInput.customerName).toBeUndefined();
+    expect(createEntryFields(deps)).not.toHaveProperty('name');
+  });
+
+  it('a blank name is treated as omitted rather than stored as an empty string', async () => {
+    const deps = makeDeps();
+    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com&name=%20%20' }), deps);
+
+    const sessionInput = (deps.createCheckoutSession as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(sessionInput.customerName).toBeUndefined();
+    expect(createEntryFields(deps)).not.toHaveProperty('name');
+  });
+
+  it('an over-long name is capped at 200 characters so a payer cannot bloat the entry or the Stripe customer record', async () => {
+    const deps = makeDeps();
+    await handlePaymentRequest(
+      makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com&name=' + 'n'.repeat(500) }),
+      deps,
+    );
+
+    const sessionInput = (deps.createCheckoutSession as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(sessionInput.customerName).toBe('n'.repeat(200));
+    expect(createEntryFields(deps).name).toBe('n'.repeat(200));
+  });
+
+  it('PayPal captures the payer itself, so a PayPal request without an email still succeeds', async () => {
+    const createPaypalOrder = vi.fn(async () => ({
+      approvalUrl: 'https://paypal.example/approve/order-1',
+      providerRef: 'order-1',
+    }));
+    const deps = makeDeps({ createPaypalOrder });
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&provider=paypal' }), deps);
+
+    expect(result.status).toBe(302);
+    expect(createEntryFields(deps)).not.toHaveProperty('email');
+  });
+
+  it('PayPal with an email still records it on the entry for the admin view', async () => {
+    const createPaypalOrder = vi.fn(async () => ({
+      approvalUrl: 'https://paypal.example/approve/order-1',
+      providerRef: 'order-1',
+    }));
+    const deps = makeDeps({ createPaypalOrder });
+    await handlePaymentRequest(
+      makeInput({ body: 'amount=200&currency=usd&provider=paypal&email=payer%40example.com' }),
+      deps,
+    );
+
+    expect(createEntryFields(deps)).toMatchObject({ email: 'payer@example.com' });
+  });
+
+  it('provider=paypal with PayPal NOT configured falls through to Stripe, so a malformed email is still rejected', async () => {
+    const deps = makeDeps();
+    const result = await handlePaymentRequest(
+      makeInput({ body: 'amount=200&currency=usd&provider=paypal&email=not-an-email' }),
+      deps,
+    );
+
+    expect(result.status).toBe(400);
+    expect(JSON.parse(result.body ?? '{}')).toEqual({ ok: false, reason: 'invalid-email' });
+    expect(deps.createCheckoutSession).not.toHaveBeenCalled();
+  });
+
+  it('provider=paypal with PayPal NOT configured and no email falls through to Stripe and succeeds without customerEmail', async () => {
+    const deps = makeDeps();
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&provider=paypal' }), deps);
+
+    expect(result.status).toBe(302);
+    const sessionInput = (deps.createCheckoutSession as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(sessionInput.customerEmail).toBeUndefined();
   });
 });
 
@@ -431,7 +622,7 @@ describe('handlePaymentRequest — fee selector opt-in (payments.feeOverrides)',
 
   it('default config: a payer-posted fee=0 cannot waive the configured fee — the 3% line is still charged and the ignored override is logged', async () => {
     const deps = makeDeps();
-    const result = await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd&fee=0' }), deps);
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd&fee=0&email=payer%40example.com' }), deps);
 
     expect(result.status).toBe(302);
     expect(deps.createCheckoutSession).toHaveBeenCalledWith(
@@ -449,7 +640,7 @@ describe('handlePaymentRequest — fee selector opt-in (payments.feeOverrides)',
 
   it("feeOverrides: 'query' + fee=0 -> the host opted in, so fees are waived and the total equals the base amount", async () => {
     const deps = makeDeps({ config: configWithFeeOverrides('query') });
-    const result = await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd&fee=0' }), deps);
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd&fee=0&email=payer%40example.com' }), deps);
 
     expect(result.status).toBe(302);
     expect(deps.createCheckoutSession).toHaveBeenCalledWith(
@@ -466,7 +657,7 @@ describe('handlePaymentRequest — fee selector opt-in (payments.feeOverrides)',
     const deps = makeDeps({
       config: configWithFeeOverrides('query', { flat: [{ label: 'Flat fee', flatCents: 250 }] }),
     });
-    const result = await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd&fee=flat' }), deps);
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd&fee=flat&email=payer%40example.com' }), deps);
 
     expect(result.status).toBe(302);
     expect(deps.createCheckoutSession).toHaveBeenCalledWith(
@@ -480,7 +671,7 @@ describe('handlePaymentRequest — fee selector opt-in (payments.feeOverrides)',
 
   it('a request with NO fee field never logs the ignored-override event — the log means "someone tried", not "every payment"', async () => {
     const deps = makeDeps();
-    await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd' }), deps);
+    await handlePaymentRequest(makeInput({ body: 'amount=100&currency=usd&email=payer%40example.com' }), deps);
 
     expect(loggedEvents(deps)).not.toContain('payment-request.fee-override-ignored');
   });
@@ -525,7 +716,7 @@ describe('handlePaymentRequest — happy path (PayPal)', () => {
 describe('handlePaymentRequest — checker B1 (trailingSlash-aware redirect URLs)', () => {
   it("trailingSlash 'always' -> successUrl/cancelUrl end in '/' (slash before the query)", async () => {
     const deps = makeDeps({ config: makeConfig({ trailingSlash: 'always' }) });
-    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd' }), deps);
+    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com' }), deps);
 
     const call = (deps.createCheckoutSession as ReturnType<typeof vi.fn>).mock.calls[0]![0];
     expect(call.successUrl).toBe('https://example.com/forms-pay/success/?session_id={CHECKOUT_SESSION_ID}');
@@ -534,14 +725,14 @@ describe('handlePaymentRequest — checker B1 (trailingSlash-aware redirect URLs
 
   it("trailingSlash undefined/'never' -> successUrl/cancelUrl stay slashless", async () => {
     const deps = makeDeps();
-    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd' }), deps);
+    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com' }), deps);
 
     const call = (deps.createCheckoutSession as ReturnType<typeof vi.fn>).mock.calls[0]![0];
     expect(call.successUrl).toBe('https://example.com/forms-pay/success?session_id={CHECKOUT_SESSION_ID}');
     expect(call.cancelUrl).toBe('https://example.com/forms-pay?amount=200.00');
 
     const depsNever = makeDeps({ config: makeConfig({ trailingSlash: 'never' }) });
-    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd' }), depsNever);
+    await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com' }), depsNever);
     const callNever = (depsNever.createCheckoutSession as ReturnType<typeof vi.fn>).mock.calls[0]![0];
     expect(callNever.successUrl).toBe('https://example.com/forms-pay/success?session_id={CHECKOUT_SESSION_ID}');
     expect(callNever.cancelUrl).toBe('https://example.com/forms-pay?amount=200.00');
@@ -578,7 +769,7 @@ describe('handlePaymentRequest — provider/storage failure handling', () => {
       throw new Error('Stripe is not configured (STRIPE_SECRET_KEY missing)');
     });
     const deps = makeDeps({ createCheckoutSession });
-    const result = await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd' }), deps);
+    const result = await handlePaymentRequest(makeInput({ body: 'amount=200&currency=usd&email=payer%40example.com' }), deps);
 
     expect(result.status).toBe(500);
     expect(JSON.parse(result.body ?? '{}')).toEqual({ ok: false, reason: 'error' });

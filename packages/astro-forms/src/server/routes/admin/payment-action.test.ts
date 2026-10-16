@@ -152,6 +152,7 @@ describe('POST /forms-admin/payments/action', () => {
       currency: 'usd',
       memo: 'Website redesign',
       entryId: 'e1',
+      customerEmail: 'customer@example.com',
     });
     expect(attachPaymentMock).toHaveBeenCalledWith('e1', {
       provider: 'stripe',
@@ -170,6 +171,19 @@ describe('POST /forms-admin/payments/action', () => {
     });
     expect(res.status).toBe(302);
     expect(res.headers.get('Location')).toBe('/forms-admin/entries/e1');
+  });
+
+  it("passes the entry's captured email to the Stripe link so the payer's address is prefilled; no email on the entry sends none", async () => {
+    const sentEmail = (): unknown => (createPaymentLinkMock.mock.calls as unknown as [{ customerEmail?: string }][])[0]![0].customerEmail;
+
+    getEntryByIdMock.mockResolvedValueOnce(makeEntry({ fields: { name: 'No Email' } }));
+    await callPost({ entryId: 'e1', provider: 'stripe', amount: '10' });
+    expect(sentEmail()).toBeUndefined();
+
+    createPaymentLinkMock.mockClear();
+    getEntryByIdMock.mockResolvedValueOnce(makeEntry({ fields: { 'Contact Email': ' Payer@Example.com ' } }));
+    await callPost({ entryId: 'e1', provider: 'stripe', amount: '10' });
+    expect(sentEmail()).toBe('Payer@Example.com');
   });
 
   it('honors a config paymentQuote template override, passing it through to sendPaymentQuoteEmail', async () => {

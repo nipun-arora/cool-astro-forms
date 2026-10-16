@@ -9,6 +9,186 @@ below as **BREAKING** rather than held for a 1.0 major.
 
 Entries are newest first.
 
+## [0.1.17] - 2026-10-16
+
+### Changed
+
+- **The `/forms-pay` page now asks for the payer's email.** Stripe can match
+  a repeat payer to one Customer only when it is given an email, so the page
+  has a required Email field and an optional Name field. This is not a
+  breaking change: the server does not require an email. A post to
+  `/api/forms/pay/create-session` with no `email`, or a blank one, is still
+  accepted; Stripe creates a Customer for the payment through
+  `customer_creation: 'always'`, but repeat payments by the same person are
+  not matched to one Customer. Only an `email` that is present and malformed
+  (not a valid address, or longer than 254 characters) is rejected, with
+  `400` and `{ ok: false, reason: 'invalid-email' }`, before the Turnstile
+  check and before any entry or Stripe session exists. The email and the
+  name (trimmed, capped at 200 characters) are stored on the payment-request
+  entry. The PayPal path never rejects on email, because PayPal captures the
+  payer itself; a valid one is still recorded.
+  - **The page:** the browser requires a full address with a dot in the
+    domain (`name@gmail` is refused before the post). If the server still
+    answers `invalid-email`, the page stays where it is, shows an inline
+    "That email address does not look right" notice next to the field, and
+    hands the Pay buttons back. When the post bounces back to the page with
+    an error, for example a Turnstile check that failed or expired, the
+    page keeps the `?email=` and `?name=` prefill (and any other query
+    parameter), so the payer does not retype them.
+  - **Upgrading:** nothing breaks. Existing `/forms-pay?amount=…` links and
+    host-owned pay forms that post only `amount` and `currency` keep
+    working. To get repeat payers matched to one Stripe Customer, add an
+    `email` field (and optionally `name`) to a host-owned pay form. To save a
+    known client the typing on the shipped page, add `&email=` and `&name=` to
+    the link you send them, for example
+    `/forms-pay?amount=200&email=client@example.com&name=Jane%20Doe`.
+
+### Fixed
+
+- **Stripe showed "Customers created: 0" while revenue came in, and a
+  repeat payer never built up a history.** Through 0.1.16 every Checkout
+  Session and Payment Link the package created had no customer, so each
+  payment was a guest checkout. Now a Checkout Session carries a Stripe
+  Customer, for both the `/forms-pay` page and `createCheckoutForEntry`, and
+  the package never creates or writes a Customer itself:
+  - **How a Customer is found.** The payer's email (lowercased and trimmed)
+    is only looked up. A Customer is reused when it is tagged
+    `metadata.source = 'cool-astro-forms'`, its email matches exactly, it is
+    not deleted and Stripe lists no saved payment method on it. The lookup
+    runs `customers.list` and one Stripe Search in parallel on every call, so
+    the response time does not reveal whether an address has paid before.
+    When several Customers qualify, the oldest is used.
+  - **How a Customer is made.** With no reusable Customer (a new payer, no
+    email, or a failed lookup) the session is created with
+    `customer_creation: 'always'` and the normalized `customer_email`, so
+    Stripe creates the Customer only when the payer confirms the payment. An
+    abandoned or scripted submit of the public pay page leaves no Customer
+    behind.
+  - **How a Customer becomes reusable.** When the Stripe webhook marks a
+    payment paid, it tags the paying Customer (`session.customer`) with
+    `metadata.source = 'cool-astro-forms'`. The next payment by that email
+    then reuses it. Only the delivery that actually marks the row paid does
+    this; a failed tag is logged as `stripe.customer-adopt-failed` (event id
+    and Stripe error type only) and never changes the webhook's response.
+    Admin quote Payment Link payments are tagged the same way.
+  - **Security:** the email is typed by whoever opens the pay page, and
+    attaching a Customer to a Checkout Session makes Stripe show that
+    Customer's saved cards, name and billing address to that person. So
+    Customers with the same email that this package did not tag (for example
+    records left by an earlier WordPress plugin) are deliberately not reused,
+    and the old record is not touched. Sessions that carry a Customer set
+    `saved_payment_method_options.payment_method_save: 'disabled'`, so
+    Checkout never saves a card to the Customer or offers one back, and
+    exclude `customer_balance`, so a matched Customer's cash balance cannot
+    be spent by someone who only knows the email. Because an operator or
+    another integration can still add a card to a tagged Customer, one is
+    reused only when Stripe lists no payment method on it (if it holds one,
+    or the check fails, logged as
+    `stripe.customer-payment-methods-check-failed`, the Customer is skipped).
+  - **The name is not written to Stripe.** `customerName` on
+    `createCheckoutForEntry` is validated but not sent, and the `/forms-pay`
+    Name field is stored on the payment-request entry only; Checkout collects
+    the payer's own name.
+  - It never blocks a payment. If the lookup fails (Stripe unreachable, or
+    a restricted key without Customers access) the failure is logged as
+    `stripe.customer-lookup-failed` with the error type only, never the
+    email, and the session falls back to `customer_creation: 'always'`.
+  - `createCheckoutForEntry` and a reused `idempotencyKey`: the Customer
+    lookup is part of the request, so a retry can meet a different shape from
+    the first call (the first call found no Customer and sent
+    `customer_creation`, the retry finds one, usually because the payer paid
+    in between, and would send `customer`). Stripe refuses a reused key whose
+    parameters differ, so the retry is resent once without the Customer under
+    the same key, and Stripe replays the original session. The reverse (the
+    first call carried a Customer, the retry finds none) cannot be repaired
+    and returns `provider-error`; the same key works again once the lookup
+    finds the Customer.
+  - **Upgrading:** a restricted Stripe key needs read access to Customers and
+    PaymentMethods for the lookup, and write access to Customers for the
+    tagging, as well as Checkout Sessions (and Payment Links, for the admin
+    quote flow). Without them payments still work: the lookup or the tagging
+    fails safe and is logged, and a repeat payer gets a new Customer for each
+    payment.
+  - **Upgrading:** a payer who already exists in Stripe as a Customer not
+    tagged by this package gets a new Customer on their first payment from
+    0.1.17; their earlier payments and record stay where they are, and the
+    Customer Stripe creates is reused from the second payment on.
+- **Admin quote Payment Links now create a Customer when they are paid.**
+  They are created with `customer_creation: 'always'`, and the entry's email
+  (when it has one) is prefilled on the link through Stripe's
+  `prefilled_email` link parameter. Stripe's API does not let a Payment Link
+  take an existing Customer, so a repeat payer on admin quote links still
+  gets a new Customer per link. The webhook tags the paying Customer like
+  any other, so later pay-page and `createCheckoutForEntry` payments by the
+  same email reuse it. For one Customer per payer from the first payment,
+  create the checkout with `createCheckoutForEntry` instead.
+- **Stripe's Payments list is readable.** Every Checkout Session the package
+  creates sets `client_reference_id` to the entry id, and every PaymentIntent
+  (sessions and admin Payment Links) carries `entry_id` in its metadata and a
+  description: the memo or product name, otherwise `Payment` (`Payment
+  request` for an admin link with no memo).
+- **Storage migrations are atomic and safe to re-run.** On SQLite and Turso,
+  each migration block and its `user_version` bump now apply in one
+  transaction, so a process that stops mid-migration leaves nothing
+  half-applied. An `ALTER TABLE ... ADD COLUMN` whose column a crashed earlier
+  run already added is skipped instead of failing on "duplicate column name",
+  so a database the old un-transacted Turso runner left half-way through a
+  block boots on this version. Two processes that start at the same moment
+  (for example serverless cold starts) both finish cleanly: the one that
+  loses the race finds the block already applied. Nothing in the schema
+  changes.
+
+### Security
+
+- **2026-10-06: the http-cache-semantics advisory listed as Known under
+  0.1.15 now has a fix.** `http-cache-semantics` 4.3.0 (released
+  2026-10-04) fixes
+  [GHSA-ch52-4w7c-c8xp](https://github.com/advisories/GHSA-ch52-4w7c-c8xp)
+  and sits inside the `^4.2.0` range every Astro 7 release asks for, so no
+  Astro or `cool-astro-forms` upgrade is needed. On a site that still
+  reports it, run `npm update http-cache-semantics` and commit the
+  lockfile. The package itself does not depend on it (it comes from your
+  Astro install), so nothing in the published 0.1.16 tarball changes.
+
+### Added
+
+- **The admin shows who paid.** The Payments list
+  (`/forms-admin/payments`) has a new Payer column, and an entry's payment
+  rows show the payer plus a "Stripe customer" link to the Customer in the
+  Stripe dashboard (the test-mode dashboard for a test payment). The payer
+  email and the Stripe Customer id are recorded by the Stripe webhook in the
+  same atomic write that marks the payment paid, so a replayed event cannot
+  write them twice. The email is escaped wherever it is shown, and an id
+  that is not a plain `cus_…` is never turned into a link.
+  - **Upgrading:** storage migration v6 adds two nullable columns to
+    `payments`, `customer_ref` and `payer_email`. It runs automatically on
+    the next boot for both SQLite and Turso, and nothing is renamed or
+    dropped. Payments that were already paid, unpaid rows, guest checkouts
+    and PayPal rows keep both columns empty (the Payer cell is blank); only
+    payments marked paid from now on fill them. On SQLite, an older version
+    refuses to open a database that has been migrated to v6 (it says to
+    restore a backup), so to roll back to 0.1.16 restore a database backup
+    taken before the upgrade.
+- `createCheckoutForEntry` takes an optional `customerName` (a string of up
+  to 200 characters; it is validated but not sent to Stripe, which collects
+  the payer's name at checkout). `customerEmail` now looks up the payer's
+  Stripe Customer and attaches it to the session when one is reusable;
+  otherwise Stripe creates the Customer when the payer confirms, instead of a
+  guest checkout. See docs/payments.md section 2a.
+- `/forms-pay` link parameters `email` and `name` prefill the new fields.
+
+### Internal
+
+- Workspace lockfile refreshed within existing ranges:
+  `http-cache-semantics` 4.2.0 to 4.3.0 (GHSA-ch52-4w7c-c8xp),
+  `source-map-js` 1.2.1 to 1.2.2 (high,
+  [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q),
+  via astro, jsdom and tsup), `proxy-addr` 2.0.7 to 2.0.8 and `qs` 6.15.3
+  to 6.16.0 (playground's express), `undici` 7.28.0 to 7.30.0 (jsdom), and
+  `vitest` 4.1.10 to 4.1.11. No `package.json` changed. The only advisory
+  left is a low in esbuild 0.27.7 (vite's and tsup's copy; its fix is
+  0.28, outside their ranges).
+
 ## [0.1.16] - 2026-10-03
 
 ### Fixed

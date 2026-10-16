@@ -5,7 +5,8 @@
  * this handler.
  *
  * Ordered pipeline: origin -> size cap -> dedicated rate limiter -> parse
- * base amount -> validate (reject, never clamp) -> Turnstile HARD gate ->
+ * base amount -> validate (reject, never clamp) -> payer email (optional;
+ * rejected only when present and invalid on the Stripe path) -> Turnstile HARD gate ->
  * server-side fee breakdown -> compute redirect URLs -> create the synthetic
  * `_payment_request` entry -> create the checkout session/order -> attach
  * the payment row -> 302 redirect.
@@ -34,6 +35,7 @@
  * 03-CONTEXT.md).
  */
 import { ulid } from 'ulid';
+import { z } from 'zod';
 import type { CoolFormsConfig } from '../../config.js';
 import { MAX_PAYLOAD_BYTES } from '../../limits.js';
 import type { FeeBreakdownLine } from '../../types.js';
@@ -53,6 +55,7 @@ export type PaymentRequestRejectReason =
   | 'invalid'
   | 'amount-range'
   | 'currency'
+  | 'invalid-email'
   | 'turnstile'
   | 'error';
 
@@ -68,7 +71,7 @@ export interface PaymentRequestResponseBody {
 export interface HandlePaymentRequestInput {
   /**
    * Raw POSTed body — form-urlencoded (amount/pay/currency/fee/label/
-   * provider/cf-turnstile-response). Parsed the same way a query string is
+   * email/name/provider/cf-turnstile-response). Parsed the same way a query string is
    * (D4): `new URLSearchParams(body)` has identical key=value&key=value
    * grammar, so `pricing.ts`'s functions apply unmodified.
    */
@@ -91,6 +94,9 @@ export interface CreateCheckoutSessionDepInput {
   entryId: string;
   successUrl: string;
   cancelUrl: string;
+  /** Payer email — lets Stripe find-or-create a Customer so repeat payers are attributed. */
+  customerEmail?: string;
+  customerName?: string;
 }
 
 export interface CreateCheckoutSessionDepResult {
@@ -166,6 +172,13 @@ function reject(
   return json(status, { ok: false, reason });
 }
 
+/** RFC 5321 path limit — an address longer than this cannot be real. */
+const MAX_EMAIL_LENGTH = 254;
+/** Cap on the optional payer name — stored on the entry and sent to Stripe. */
+const MAX_NAME_LENGTH = 200;
+
+const emailSchema = z.email().max(MAX_EMAIL_LENGTH);
+
 /**
  * cents -> a dollars string matching pricing.ts's `AMOUNT_DOLLARS_PATTERN`
  * grammar (`/^\d+(\.\d{1,2})?$/`). `toFixed(2)` always emits exactly 2
@@ -216,6 +229,26 @@ export async function handlePaymentRequest(
     return reject(deps, 400, validation.reason, { ip });
   }
   const amountCents = baseAmountCents as number;
+
+  // 5b. Payer identity. Stripe only records a Customer (and attributes repeat
+  // payments to it) when it is handed an email. The shipped pay page asks for
+  // one, but the server contract stays non-breaking for host-owned pay forms
+  // that post only amount+currency: a MISSING/blank email is accepted and no
+  // customerEmail is forwarded (stripe.ts then creates an anonymous Customer).
+  // A PRESENT but invalid email on the Stripe path is a payer typo — rejected
+  // here, before the Turnstile network round trip and before any entry or
+  // Checkout Session exists. The PayPal path captures the payer itself; a
+  // valid email is still recorded. Neither value is ever logged (logs go to
+  // host stdout).
+  const provider = params.get('provider') === 'paypal' ? 'paypal' : 'stripe';
+  const usePaypal = provider === 'paypal' && deps.createPaypalOrder !== undefined;
+  const rawEmail = (params.get('email') ?? '').trim();
+  const parsedEmail = emailSchema.safeParse(rawEmail);
+  const customerEmail = parsedEmail.success ? parsedEmail.data : undefined;
+  if (!usePaypal && rawEmail !== '' && !customerEmail) {
+    return reject(deps, 400, 'invalid-email', { ip });
+  }
+  const customerName = (params.get('name') ?? '').trim().slice(0, MAX_NAME_LENGTH).trim() || undefined;
 
   // 6. Turnstile HARD gate (T-03-20) — unlike the abandon route's soft-log,
   // an absent/failing check here is a hard reject BEFORE any entry or
@@ -304,21 +337,28 @@ export async function handlePaymentRequest(
   const returnUrl = deps.config.siteUrl + adminUrl('/forms-pay/paypal-return', trailingSlash);
 
   const memo = params.get('label') ?? undefined;
-  const provider = params.get('provider') === 'paypal' ? 'paypal' : 'stripe';
 
   try {
     const entry = await deps.storage.createEntry({
       siteId: deps.config.siteId,
       formId: PAYMENT_REQUEST_FORM_ID,
       status: 'submitted',
-      fields: { amountCents, currency, memo, source: 'payment-request' },
+      fields: {
+        amountCents,
+        currency,
+        memo,
+        // Who paid — surfaced in the admin entries view.
+        ...(customerEmail ? { email: customerEmail } : {}),
+        ...(customerName ? { name: customerName } : {}),
+        source: 'payment-request',
+      },
       // No pre-existing visitor session backs a standalone payment-request
       // link (RESEARCH Pattern 2) — a fresh synthetic identity anchors this
       // one-off entry, matching sqlite.ts's own id-generation convention.
       visitorUuid: ulid(),
     });
 
-    if (provider === 'paypal' && deps.createPaypalOrder) {
+    if (usePaypal && deps.createPaypalOrder) {
       const order = await deps.createPaypalOrder({
         totalCents: breakdown.totalCents,
         currency,
@@ -349,6 +389,8 @@ export async function handlePaymentRequest(
       entryId: entry.id,
       successUrl,
       cancelUrl,
+      customerEmail,
+      customerName,
     });
     await deps.storage.attachPayment(entry.id, {
       provider: 'stripe',

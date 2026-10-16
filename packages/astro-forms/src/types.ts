@@ -210,6 +210,20 @@ export interface Payment {
   providerRef?: string;
   providerIds?: Record<string, unknown>;
   events?: PaymentEvent[];
+  /**
+   * Stripe Customer id (`cus_…`) the paid Checkout Session belongs to (0.1.17,
+   * migration v6). Written by the Stripe webhook in the same atomic patch as
+   * the paid flip, so it is absent on unpaid rows, guest checkouts, PayPal
+   * rows, and rows that predate 0.1.17. Read by the admin to link the customer in Stripe.
+   */
+  customerRef?: string | null;
+  /**
+   * The payer's email as Stripe reported it (`customer_details.email`, else
+   * `customer_email`), trimmed and lowercased so one payer is one string
+   * (0.1.17, migration v6). Same write rules as `customerRef`. Payer-controlled
+   * text: escape it wherever it is rendered.
+   */
+  payerEmail?: string | null;
   createdAt: number;
   updatedAt: number;
 }

@@ -640,6 +640,52 @@ export function renderPaymentRequestChipHtml(
 const PAYMENT_PROVIDERS: readonly PaymentProvider[] = ['stripe', 'paypal'];
 const PAYMENT_STATUSES: readonly PaymentStatus[] = ['link_created', 'link_sent', 'paid', 'failed', 'refunded'];
 
+// ---------------------------------------------------------------------------
+// Payer visibility (0.1.17). A paid Stripe payment records the Stripe Customer
+// and the payer's email (migration v6), so a repeat payer is recognisable and
+// the operator can jump to the customer in Stripe. The email is payer-
+// controlled text (escaped wherever it is rendered) and the customer id is
+// interpolated into a URL, so an id that is not a plain `cus_…` is never
+// turned into a link.
+// ---------------------------------------------------------------------------
+
+/** Stripe customer ids are `cus_` followed by letters and digits; anything else is never used to build a URL. */
+const STRIPE_CUSTOMER_ID = /^cus_[A-Za-z0-9]+$/;
+
+/**
+ * The Stripe dashboard page for a customer: `/test/customers/…` for a
+ * test-mode payment, `/customers/…` for live. `undefined` (no link) for a
+ * missing or malformed id.
+ */
+export function stripeCustomerUrl(customerRef: string | null | undefined, testMode: boolean): string | undefined {
+  if (!customerRef || !STRIPE_CUSTOMER_ID.test(customerRef)) return undefined;
+  return `https://dashboard.stripe.com/${testMode ? 'test/' : ''}customers/${customerRef}`;
+}
+
+/**
+ * Whether a payment was taken in Stripe test mode, with nothing stored for
+ * the purpose: a `cs_test_…` session id says so, and so does the `livemode:
+ * false` flag the webhook stamps on the paid event (which covers rows keyed
+ * by a `plink_…` Payment Link id, whose prefix does not). When neither is
+ * present the caller falls back to the live dashboard URL.
+ */
+function isStripeTestPayment(payment: Payment): boolean {
+  if (payment.providerRef?.startsWith('cs_test_')) return true;
+  return (payment.events ?? []).some((event) => event.livemode === false);
+}
+
+/** "Stripe customer" link (new tab, no opener) or '' when the payment has no usable customer id. */
+function renderStripeCustomerLinkHtml(payment: Payment): string {
+  const url = stripeCustomerUrl(payment.customerRef, isStripeTestPayment(payment));
+  return url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Stripe customer</a>` : '';
+}
+
+/** Payer email (escaped) and Stripe customer link, or '' when the payment carries neither. */
+function renderPayerHtml(payment: Payment): string {
+  const email = payment.payerEmail ? escapeHtml(payment.payerEmail) : '';
+  return [email, renderStripeCustomerLinkHtml(payment)].filter(Boolean).join(' · ');
+}
+
 /**
  * Maps `Astro.url.searchParams` into a valid `PaymentFilter`: provider/
  * status validated against their vocabularies (garbage silently ignored,
@@ -746,7 +792,8 @@ export interface RenderPaymentsTableOptions {
 /**
  * Renders a provider/status filter form + payments table + pagination as
  * one HTML fragment. Columns: Created / Amount / Currency / Provider /
- * Status / Entry (links to `/forms-admin/entries/{entryId}`) / Pay link.
+ * Status / Entry (links to `/forms-admin/entries/{entryId}`) / Payer (0.1.17:
+ * payer email + Stripe customer link) / Pay link.
  * EMPTY/ERROR/SUCCESS states all handled here; every link is
  * `adminUrl`-built (checker B1). Amount/Currency are deliberately SEPARATE
  * columns (a major-unit figure in the currency's own decimals, via
@@ -779,7 +826,7 @@ export function renderPaymentsTableHtml(opts: RenderPaymentsTableOptions): strin
       const payLinkCell = payment.payLinkUrl
         ? `<a href="${escapeHtml(payment.payLinkUrl)}">Pay link</a>`
         : '';
-      return `<tr><td>${created}</td><td>${amount}</td><td>${currency}</td><td>${provider}</td><td>${status}</td><td><a href="${escapeHtml(entryHref)}">${escapeHtml(payment.entryId)}</a></td><td>${payLinkCell}</td></tr>`;
+      return `<tr><td>${created}</td><td>${amount}</td><td>${currency}</td><td>${provider}</td><td>${status}</td><td><a href="${escapeHtml(entryHref)}">${escapeHtml(payment.entryId)}</a></td><td>${renderPayerHtml(payment)}</td><td>${payLinkCell}</td></tr>`;
     })
     .join('');
 
@@ -787,7 +834,7 @@ export function renderPaymentsTableHtml(opts: RenderPaymentsTableOptions): strin
     '<div class="table-wrap">',
     '<table>',
     '<caption class="sr-only">Payments</caption>',
-    '<thead><tr><th scope="col">Created</th><th scope="col">Amount</th><th scope="col">Currency</th><th scope="col">Provider</th><th scope="col">Status</th><th scope="col">Entry</th><th scope="col">Pay link</th></tr></thead>',
+    '<thead><tr><th scope="col">Created</th><th scope="col">Amount</th><th scope="col">Currency</th><th scope="col">Provider</th><th scope="col">Status</th><th scope="col">Entry</th><th scope="col">Payer</th><th scope="col">Pay link</th></tr></thead>',
     `<tbody>${rows}</tbody>`,
     '</table>',
     '</div>',
@@ -827,7 +874,9 @@ export interface RenderPaymentsSectionOptions {
 
 /**
  * One row per payment: status, amount (currency-aware), provider, created,
- * and for a row with a pay link a read-only input plus a "Copy link" button.
+ * (0.1.17) the payer email + Stripe customer link when the paid webhook
+ * recorded them, and for a row with a pay link a read-only input plus a
+ * "Copy link" button.
  * The two are tied by `data-caf-copy-target` and handled by entry-detail's
  * bundled script: no inline handler or style attribute, so a strict CSP does
  * not break the control.
@@ -841,7 +890,9 @@ function renderPaymentRowHtml(payment: Payment): string {
   const copyControl = payment.payLinkUrl
     ? `<input type="text" readonly id="${escapeHtml(inputId)}" class="pay-link-input" value="${escapeHtml(payment.payLinkUrl)}" data-caf-select-on-focus aria-label="Payment link" /> <button type="button" data-caf-copy-target="${escapeHtml(inputId)}">Copy link</button>`
     : '(no link yet)';
-  return `<li><strong>${status}</strong> — ${escapeHtml(amount)} via ${provider} — ${created}<br />${copyControl}</li>`;
+  const payer = renderPayerHtml(payment);
+  const payerLine = payer ? `<br />Payer: ${payer}` : '';
+  return `<li><strong>${status}</strong> — ${escapeHtml(amount)} via ${provider} — ${created}${payerLine}<br />${copyControl}</li>`;
 }
 
 /**

@@ -22,6 +22,23 @@
  * handler only marks a row paid when those match it. Refunds, disputes and
  * expired sessions are acknowledged without changing the row.
  *
+ * 0.1.17: also reads the Stripe Customer id and the payer's email off the
+ * verified session (plus `event.livemode`) and passes them to the handler,
+ * which records them on the payment row in the same atomic write that marks
+ * it paid. Neither value is logged here.
+ *
+ * 0.1.17 (security): checkout never creates or writes a Stripe Customer from
+ * visitor input; a new payer's session makes Stripe create one when the
+ * payer confirms. When the handler reports that THIS delivery marked the row
+ * paid (`markedPaid`), the route ADOPTS `session.customer`: it tags it
+ * `metadata.source: 'cool-astro-forms'` (`adoptStripeCustomer`), which makes
+ * it reusable for the same payer's next payment (payments/customers.ts). An
+ * unpaid or mismatched session, a refund and a duplicate delivery are never
+ * adopted. Adoption is best effort: it never throws and never changes the
+ * status Stripe gets, and a failure is logged (`stripe.customer-adopt-failed`)
+ * with the event id only. One Stripe client per delivery verifies the
+ * signature and makes that update.
+ *
  * Clean-room: written fresh against 03-CONTEXT.md/03-RESEARCH.md, not
  * derived from any commercial form-plugin source.
  */
@@ -32,7 +49,8 @@ import { log, logError } from '../../log.js';
 import type { CafTemplates } from '../../notify.js';
 import { sendPaymentReceivedEmail } from '../../notify.js';
 import { MAX_WEBHOOK_PAYLOAD_BYTES } from '../../payment-constants.js';
-import { verifyStripeWebhook } from '../../payments/stripe.js';
+import { adoptStripeCustomer } from '../../payments/customers.js';
+import { getStripeClient, verifyStripeWebhook } from '../../payments/stripe.js';
 import { contentLengthWithinCap, readBodyCapped } from '../../security/size-cap.js';
 import { getStorageAdapter } from '../../storage/index.js';
 import { deliverWebhook } from '../../webhooks/deliver.js';
@@ -79,6 +97,32 @@ function paymentLinkId(session: Stripe.Checkout.Session): string | undefined {
   return link?.id;
 }
 
+/**
+ * The Stripe Customer id (`cus_…`) a session belongs to, whether Stripe sent
+ * the bare id or an expanded object; null for a session with no customer
+ * (a guest checkout from a Payment Link that does not create customers).
+ */
+function customerId(session: Stripe.Checkout.Session): string | null {
+  const customer = session.customer;
+  const id = typeof customer === 'string' ? customer : customer?.id;
+  return id ? id : null;
+}
+
+/**
+ * The payer's email, normalised (trimmed, lowercased) so the same person
+ * typing different casing is one payer. The email the payer used at checkout
+ * (`customer_details.email`) wins over the one the host prefilled
+ * (`customer_email`); a blank value falls through to the next. Null when the
+ * session carries neither.
+ */
+function payerEmail(session: Stripe.Checkout.Session): string | null {
+  for (const candidate of [session.customer_details?.email, session.customer_email]) {
+    const email = candidate?.trim().toLowerCase();
+    if (email) return email;
+  }
+  return null;
+}
+
 export const POST: APIRoute = async ({ request }) => {
   // PAY-04: module stays inert without the webhook secret (mirrors canary.ts's own env-gated 404).
   if (!process.env.STRIPE_WEBHOOK_SECRET) {
@@ -105,7 +149,10 @@ export const POST: APIRoute = async ({ request }) => {
   const rawBody = readResult.text;
 
   const signature = request.headers.get('stripe-signature') ?? '';
-  const verified = verifyStripeWebhook(rawBody, signature);
+  // One client per delivery: it verifies the signature here and, after a
+  // paid flip, adopts the paying Customer below (0.1.17).
+  const client = getStripeClient();
+  const verified = verifyStripeWebhook(rawBody, signature, { client });
   if (!verified.ok) {
     log('webhook.stripe.invalid-signature', {});
     return new Response('Webhook Error', { status: 400 });
@@ -127,6 +174,8 @@ export const POST: APIRoute = async ({ request }) => {
 
     const { amountCents, currency } = integrationAmount(session);
     const alternateProviderRef = paymentLinkId(session);
+    const sessionCustomerRef = customerId(session);
+    const sessionPayerEmail = payerEmail(session);
 
     const result = await handleInboundPayment(
       {
@@ -141,6 +190,10 @@ export const POST: APIRoute = async ({ request }) => {
         // 0.1.15: only a paid session for the stored amount and currency
         // marks the row paid (handle-inbound.ts judgeSettlement).
         settlement: { paid: session.payment_status === 'paid', amountCents, currency },
+        // 0.1.17: recorded on the row by the handler only when this call marks it paid.
+        ...(sessionCustomerRef ? { customerRef: sessionCustomerRef } : {}),
+        ...(sessionPayerEmail ? { payerEmail: sessionPayerEmail } : {}),
+        ...(typeof event.livemode === 'boolean' ? { livemode: event.livemode } : {}),
       },
       {
         storage,
@@ -164,6 +217,13 @@ export const POST: APIRoute = async ({ request }) => {
         log,
       },
     );
+
+    // 0.1.17: only the delivery that marked the row paid adopts, so the
+    // Customer is one Stripe made (or one already tagged) for a payer whose
+    // payment for this row was verified. Never throws, never changes status.
+    if (result.markedPaid && sessionCustomerRef && client) {
+      await adoptStripeCustomer(sessionCustomerRef, client, { eventId: event.id });
+    }
 
     return new Response(null, { status: result.status });
   } catch (err) {

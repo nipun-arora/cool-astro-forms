@@ -115,7 +115,7 @@ describe('handleInboundPayment — unknown providerRef', () => {
 
     const result = await handleInboundPayment(BASE_INPUT, deps);
 
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: false });
     expect(deps.log).toHaveBeenCalledWith('webhook.unknown-ref', {
       providerRef: 'cs_test_1',
       provider: 'stripe',
@@ -134,7 +134,7 @@ describe('handleInboundPayment — first completed event (atomic boolean-gated f
 
     const result = await handleInboundPayment(BASE_INPUT, deps);
 
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: true });
     expect(appendPaymentEventIfAbsent).toHaveBeenCalledTimes(1);
     expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith(
       'payment-1',
@@ -223,7 +223,7 @@ describe('handleInboundPayment — first completed event (atomic boolean-gated f
 
     const result = await handleInboundPayment(BASE_INPUT, deps);
 
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: true });
     expect(errorSpy).toHaveBeenCalled();
     const record = JSON.parse(errorSpy.mock.calls[0]![0] as string);
     expect(record.event).toBe('webhook.entry-flip-failed');
@@ -240,7 +240,7 @@ describe('handleInboundPayment — first completed event (atomic boolean-gated f
     const deps = makeDeps({ notify });
 
     const result = await handleInboundPayment(BASE_INPUT, deps);
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: true });
 
     // Allow the fire-and-forget rejection's .catch handler to settle.
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -253,7 +253,7 @@ describe('handleInboundPayment — first completed event (atomic boolean-gated f
   it('deliver is optional — a caller omitting it never throws', async () => {
     const deps = makeDeps({ deliver: undefined });
     const result = await handleInboundPayment(BASE_INPUT, deps);
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: true });
   });
 });
 
@@ -266,7 +266,7 @@ describe('handleInboundPayment — duplicate delivery (checker W1 atomic gate)',
 
     const result = await handleInboundPayment(BASE_INPUT, deps);
 
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: false });
     expect(deps.log).toHaveBeenCalledWith('webhook.duplicate-event', {
       paymentId: 'payment-1',
       eventId: 'evt_1',
@@ -289,7 +289,7 @@ describe('handleInboundPayment — storage failures never crash the route', () =
 
     const result = await handleInboundPayment(BASE_INPUT, deps);
 
-    expect(result).toEqual({ status: 500 });
+    expect(result).toEqual({ status: 500, markedPaid: false });
     expect(errorSpy).toHaveBeenCalled();
     const record = JSON.parse(errorSpy.mock.calls[0]![0] as string);
     expect(record.event).toBe('webhook.lookup-failed');
@@ -307,7 +307,7 @@ describe('handleInboundPayment — storage failures never crash the route', () =
 
     const result = await handleInboundPayment(BASE_INPUT, deps);
 
-    expect(result).toEqual({ status: 500 });
+    expect(result).toEqual({ status: 500, markedPaid: false });
     expect(errorSpy).toHaveBeenCalled();
     const record = JSON.parse(errorSpy.mock.calls[0]![0] as string);
     expect(record.event).toBe('webhook.append-event-failed');
@@ -327,7 +327,7 @@ describe('handleInboundPayment — refund-type (non-completed) events', () => {
       deps,
     );
 
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: false });
     expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith(
       'payment-1',
       'evt_refund_1',
@@ -346,7 +346,7 @@ describe('handleInboundPayment — refund-type (non-completed) events', () => {
 
     const result = await handleInboundPayment({ ...BASE_INPUT, eventType: 'charge.refunded' }, deps);
 
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: false });
     expect(deps.notify).not.toHaveBeenCalled();
   });
 });
@@ -368,7 +368,7 @@ describe('handleInboundPayment — no manual events[] read-check-write (checker 
     const deps = makeDeps({ storage });
 
     const result = await handleInboundPayment(BASE_INPUT, deps);
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: true });
   });
 });
 
@@ -389,7 +389,7 @@ describe('handleInboundPayment — settlement check (0.1.15)', () => {
 
     const result = await handleInboundPayment({ ...BASE_INPUT, settlement: PAID }, deps);
 
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: true });
     expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), { status: 'paid' });
     expect(deps.notify).toHaveBeenCalledTimes(1);
   });
@@ -421,7 +421,7 @@ describe('handleInboundPayment — settlement check (0.1.15)', () => {
 
       const result = await handleInboundPayment({ ...BASE_INPUT, settlement }, deps);
 
-      expect(result).toEqual({ status: 200 });
+      expect(result).toEqual({ status: 200, markedPaid: false });
       expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), undefined);
       expect(deps.log).toHaveBeenCalledWith(
         'webhook.settlement-mismatch',
@@ -494,7 +494,7 @@ describe('handleInboundPayment — alternate provider ref (payment link, F1)', (
 
     const result = await handleInboundPayment({ ...BASE_INPUT, alternateProviderRef: 'plink_1' }, deps);
 
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: true });
     expect(getPaymentByProviderRef).toHaveBeenNthCalledWith(1, 'cs_test_1');
     expect(getPaymentByProviderRef).toHaveBeenNthCalledWith(2, 'plink_1');
     expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), { status: 'paid' });
@@ -516,12 +516,212 @@ describe('handleInboundPayment — alternate provider ref (payment link, F1)', (
 
     const result = await handleInboundPayment({ ...BASE_INPUT, alternateProviderRef: 'plink_9' }, deps);
 
-    expect(result).toEqual({ status: 200 });
+    expect(result).toEqual({ status: 200, markedPaid: false });
     expect(deps.log).toHaveBeenCalledWith('webhook.unknown-ref', {
       providerRef: 'cs_test_1',
       alternateProviderRef: 'plink_9',
       provider: 'stripe',
     });
     expect(storage.appendPaymentEventIfAbsent).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.1.17 — Stripe customer visibility. A paid session records its Stripe
+// Customer and the payer's email on the payment row so a repeat payer is
+// recognisable in the admin. The values ride the SAME atomic patch as the
+// paid flip (never a second write), only on a real paid transition.
+// ---------------------------------------------------------------------------
+
+describe('handleInboundPayment — payer data on the paid flip (0.1.17)', () => {
+  const PAID = { paid: true, amountCents: 2000, currency: 'usd' };
+  const PAYER = { customerRef: 'cus_ABC123', payerEmail: 'payer@example.com' };
+
+  it('a paid session records its customer and payer email in the SAME atomic patch as the paid flip (one write, no second update)', async () => {
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const updatePayment = vi.fn();
+    const deps = makeDeps({
+      storage: makeFakeStorage({
+        appendPaymentEventIfAbsent,
+        updatePayment: updatePayment as unknown as StorageAdapter['updatePayment'],
+      }),
+    });
+
+    await handleInboundPayment({ ...BASE_INPUT, settlement: PAID, ...PAYER }, deps);
+
+    expect(appendPaymentEventIfAbsent).toHaveBeenCalledTimes(1);
+    expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), {
+      status: 'paid',
+      customerRef: 'cus_ABC123',
+      payerEmail: 'payer@example.com',
+    });
+    expect(updatePayment).not.toHaveBeenCalled();
+  });
+
+  it('works without a settlement block too (the 0.1.14 path): a completed event still carries the payer data', async () => {
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const deps = makeDeps({ storage: makeFakeStorage({ appendPaymentEventIfAbsent }) });
+
+    await handleInboundPayment({ ...BASE_INPUT, ...PAYER }, deps);
+
+    expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), {
+      status: 'paid',
+      customerRef: 'cus_ABC123',
+      payerEmail: 'payer@example.com',
+    });
+  });
+
+  it('an unpaid session records NO customer data: the event is appended without any patch', async () => {
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const deps = makeDeps({ storage: makeFakeStorage({ appendPaymentEventIfAbsent }) });
+
+    await handleInboundPayment(
+      { ...BASE_INPUT, settlement: { paid: false, amountCents: 2000, currency: 'usd' }, ...PAYER },
+      deps,
+    );
+
+    expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), undefined);
+  });
+
+  it.each([
+    ['a different amount', { paid: true, amountCents: 100, currency: 'usd' }],
+    ['a different currency', { paid: true, amountCents: 2000, currency: 'eur' }],
+  ])('a settlement with %s records NO customer data (the session is not this payment)', async (_label, settlement) => {
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const deps = makeDeps({ storage: makeFakeStorage({ appendPaymentEventIfAbsent }) });
+
+    await handleInboundPayment({ ...BASE_INPUT, settlement, ...PAYER }, deps);
+
+    expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), undefined);
+  });
+
+  it('a non-completed event (refund) never writes customer data', async () => {
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const deps = makeDeps({ storage: makeFakeStorage({ appendPaymentEventIfAbsent }) });
+
+    await handleInboundPayment({ ...BASE_INPUT, eventType: 'charge.refunded', ...PAYER }, deps);
+
+    expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), undefined);
+  });
+
+  it('a replayed webhook (the atomic primitive reports a duplicate) makes no further write and no side effect', async () => {
+    const updatePayment = vi.fn();
+    const storage = makeFakeStorage({
+      appendPaymentEventIfAbsent: vi.fn(async () => false),
+      updatePayment: updatePayment as unknown as StorageAdapter['updatePayment'],
+    });
+    const deps = makeDeps({ storage });
+
+    const result = await handleInboundPayment({ ...BASE_INPUT, settlement: PAID, ...PAYER }, deps);
+
+    expect(result).toEqual({ status: 200, markedPaid: false });
+    expect(updatePayment).not.toHaveBeenCalled();
+    expect(deps.notify).not.toHaveBeenCalled();
+    expect(deps.deliver).not.toHaveBeenCalled();
+  });
+
+  it('a guest checkout (no customer, no email) keeps the patch exactly { status: "paid" }', async () => {
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const deps = makeDeps({ storage: makeFakeStorage({ appendPaymentEventIfAbsent }) });
+
+    await handleInboundPayment({ ...BASE_INPUT, settlement: PAID, customerRef: null, payerEmail: null }, deps);
+
+    expect(appendPaymentEventIfAbsent).toHaveBeenCalledWith('payment-1', 'evt_1', expect.anything(), { status: 'paid' });
+  });
+
+  it('records only the half it has: an email with no customer, or a customer with no email', async () => {
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const deps = makeDeps({ storage: makeFakeStorage({ appendPaymentEventIfAbsent }) });
+
+    await handleInboundPayment({ ...BASE_INPUT, eventId: 'evt_a', settlement: PAID, payerEmail: 'only@example.com' }, deps);
+    await handleInboundPayment({ ...BASE_INPUT, eventId: 'evt_b', settlement: PAID, customerRef: 'cus_ONLY' }, deps);
+
+    expect(appendPaymentEventIfAbsent).toHaveBeenNthCalledWith(1, 'payment-1', 'evt_a', expect.anything(), {
+      status: 'paid',
+      payerEmail: 'only@example.com',
+    });
+    expect(appendPaymentEventIfAbsent).toHaveBeenNthCalledWith(2, 'payment-1', 'evt_b', expect.anything(), {
+      status: 'paid',
+      customerRef: 'cus_ONLY',
+    });
+  });
+
+  it('stamps the event with the provider livemode flag so the admin can pick the test or live Stripe dashboard; omitted when the route sent none', async () => {
+    const appendPaymentEventIfAbsent = vi.fn(async () => true);
+    const deps = makeDeps({ storage: makeFakeStorage({ appendPaymentEventIfAbsent }) });
+
+    await handleInboundPayment({ ...BASE_INPUT, eventId: 'evt_t', livemode: false }, deps);
+    await handleInboundPayment({ ...BASE_INPUT, eventId: 'evt_l', livemode: true }, deps);
+    await handleInboundPayment({ ...BASE_INPUT, eventId: 'evt_n' }, deps);
+
+    expect(appendPaymentEventIfAbsent).toHaveBeenNthCalledWith(
+      1,
+      'payment-1',
+      'evt_t',
+      { id: 'evt_t', type: 'checkout.session.completed', at: 5000, livemode: false },
+      { status: 'paid' },
+    );
+    expect(appendPaymentEventIfAbsent).toHaveBeenNthCalledWith(
+      2,
+      'payment-1',
+      'evt_l',
+      { id: 'evt_l', type: 'checkout.session.completed', at: 5000, livemode: true },
+      { status: 'paid' },
+    );
+    expect(appendPaymentEventIfAbsent).toHaveBeenNthCalledWith(
+      3,
+      'payment-1',
+      'evt_n',
+      { id: 'evt_n', type: 'checkout.session.completed', at: 5000 },
+      { status: 'paid' },
+    );
+  });
+
+  it('never logs the payer email or customer id (PII stays out of logs), on the paid path or the mismatch path', async () => {
+    const deps = makeDeps();
+    await handleInboundPayment({ ...BASE_INPUT, eventId: 'evt_ok', settlement: PAID, ...PAYER }, deps);
+    await handleInboundPayment(
+      { ...BASE_INPUT, eventId: 'evt_bad', settlement: { paid: false, amountCents: 2000, currency: 'usd' }, ...PAYER },
+      deps,
+    );
+
+    const logged = JSON.stringify((deps.log as ReturnType<typeof vi.fn>).mock.calls);
+    expect(logged).not.toContain('payer@example.com');
+    expect(logged).not.toContain('cus_ABC123');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.1.17 — `markedPaid` tells the calling route that THIS delivery made the
+// paid flip. The Stripe route adopts the paying Customer (tags it so the
+// payer's next payment can reuse it) only then: never for an unpaid or
+// mismatched session, a refund, or a replay of an event already applied.
+// ---------------------------------------------------------------------------
+
+describe('handleInboundPayment — markedPaid (0.1.17)', () => {
+  const PAID = { paid: true, amountCents: 2000, currency: 'usd' };
+
+  it('is true for the delivery that flips the row, and false for the same event delivered again', async () => {
+    const appendPaymentEventIfAbsent = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const deps = makeDeps({ storage: makeFakeStorage({ appendPaymentEventIfAbsent }) });
+
+    const first = await handleInboundPayment({ ...BASE_INPUT, settlement: PAID }, deps);
+    const replay = await handleInboundPayment({ ...BASE_INPUT, settlement: PAID }, deps);
+
+    expect(first.markedPaid).toBe(true);
+    expect(replay.markedPaid).toBe(false);
+    expect(replay.status).toBe(first.status);
+  });
+
+  it.each([
+    ['an unpaid session', { settlement: { ...PAID, paid: false } }],
+    ['a different amount', { settlement: { ...PAID, amountCents: 1 } }],
+    ['a refund event', { eventType: 'charge.refunded' }],
+  ])('is false for %s, which is recorded but never marks the row paid', async (_label, overrides) => {
+    const deps = makeDeps();
+
+    const result = await handleInboundPayment({ ...BASE_INPUT, settlement: PAID, ...overrides }, deps);
+
+    expect(result).toEqual({ status: 200, markedPaid: false });
   });
 });
