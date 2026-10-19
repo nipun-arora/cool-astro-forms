@@ -1,8 +1,12 @@
 {
   "name": "cool-astro-forms",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "type": "module",
   "license": "MIT",
+  "author": {
+    "name": "Nipun Arora",
+    "url": "https://nipunarora.me"
+  },
   "description": "The lead-ops platform for Astro forms: abandonment capture, recovery emails, quote payments, and a self-hosted admin. No external services, just SQLite and SMTP. MIT.",
   "keywords": [
     "astro-integration",
@@ -26,7 +30,7 @@
     "type": "git",
     "url": "git+https://github.com/nipun-arora/cool-astro-forms.git"
   },
-  "homepage": "https://github.com/nipun-arora/cool-astro-forms#readme",
+  "homepage": "https://nipunarora.me/open-source/cool-astro-forms/",
   "bugs": {
     "url": "https://github.com/nipun-arora/cool-astro-forms/issues"
   },

@@ -142,7 +142,7 @@ With Astro's `security.csp` turned on, the `/forms-admin` pages stay styled and 
 
 7. Payments close the loop: create a quote from any entry, or share `/forms-pay?amount=200` (the payer enters an email; Stripe records them as a Customer when they pay, and their next payment is matched to it). The server recomputes every total, and only a verified provider webhook marks a payment paid. The pay page submits over fetch and hops to the provider as a plain GET, so edge bot-challenges (Cloudflare and friends) cannot break the checkout hop; see [`docs/payments.md`](./docs/payments.md) section 3b.
 
-   ![Shareable payment-request page at /forms-pay with a server-computed fee breakdown](.github/assets/pay-page.png)
+   ![Shareable payment-request page at /forms-pay with payer email, optional name and a server-computed fee breakdown](.github/assets/pay-page.png)
 
 Every trigger, gate, and fallback in detail, with screenshots: [docs/how-it-works.md](./docs/how-it-works.md).
 
@@ -225,6 +225,10 @@ Uploads land in your own Google Drive over raw REST (no SDK dependency). If Driv
 ## Contributing
 
 Test and build commands, the clean-room statement, and the blocking pre-publish checklist (including a required security audit) live in [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+## Author
+
+Built and maintained by [Nipun Arora](https://nipunarora.me).
 
 ## License
 

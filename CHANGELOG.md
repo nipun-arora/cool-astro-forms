@@ -9,6 +9,26 @@ below as **BREAKING** rather than held for a 1.0 major.
 
 Entries are newest first.
 
+## [0.1.19] - 2026-10-19
+
+### Changed
+
+- The package now names its author: `package.json` carries `author`
+  (Nipun Arora, https://nipunarora.me), and `homepage` points at the project
+  page, https://nipunarora.me/open-source/cool-astro-forms/. `repository`
+  and `bugs` still point at GitHub. No runtime code changed since 0.1.18.
+
+### Documentation
+
+- Both READMEs end with an Author section: "Built and maintained by Nipun
+  Arora", linked to https://nipunarora.me.
+- The `/forms-pay` screenshots (`pay-page.png`, `pay-recovery.png`) are
+  recaptured with the Email and Name fields added in 0.1.17, and their alt
+  text names them.
+- docs/payments.md now warns that a host-owned pay form carrying `data-caf`
+  needs `data-caf-ignore` on its payer fields (or `capture.deny`), or the
+  abandonment capture alerts the owner about payers who paid.
+
 ## [0.1.18] - 2026-10-16
 
 ### Fixed

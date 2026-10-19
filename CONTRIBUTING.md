@@ -82,8 +82,9 @@ run, the following must all be true:
 4. `.github/workflows/publish.yml` is dispatched by hand (`workflow_dispatch`
    with the `confirm: publish` input) by a maintainer who has personally
    confirmed steps 1-3 — never automated, never triggered by a push.
-5. The `repository`, `homepage`, and `bugs` URLs in `package.json` point at
-   the canonical repository (`github.com/nipun-arora/cool-astro-forms`).
+5. The `repository` and `bugs` URLs in `package.json` point at the canonical
+   repository (`github.com/nipun-arora/cool-astro-forms`), and `homepage`
+   points at the project page (`https://nipunarora.me/open-source/cool-astro-forms/`).
 
 ## No AI-attribution policy
 

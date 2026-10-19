@@ -475,6 +475,16 @@ Upgrading: host-owned pay forms that post to `/api/forms/pay/create-session`
 keep working unchanged. Add an `email` field (and optionally `name`) to get
 repeat payers matched to one Customer.
 
+If that form carries `data-caf` (for example so the Turnstile loader renders
+its widget there), mark the payer fields `data-caf-ignore`. Otherwise the
+abandonment capture stages the email, any leave trigger before the payer
+presses Pay (a tab switch, an outbound link, the pointer leaving through the
+top edge) saves an abandoned draft for that form, and create-session never
+converts it, so the owner gets an "Abandoned" alert for a payer who paid.
+`forms.<id>.capture.deny: ['email', 'name']` does the same from config. Do
+not remove `data-caf` to avoid this: the loader renders the widget only on
+`[data-caf]` forms, and create-session refuses a post without a token.
+
 **`amount` and `pay` are distinct param names by design (D4)** — this makes a
 100x unit mix-up structurally impossible. If `amount` is present in the
 query string it always governs, valid or not; an invalid `amount` never
