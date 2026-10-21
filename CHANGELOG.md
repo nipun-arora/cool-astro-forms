@@ -9,7 +9,7 @@ below as **BREAKING** rather than held for a 1.0 major.
 
 Entries are newest first.
 
-## [0.1.19] - 2026-10-19
+## [0.1.19] - 2026-10-21
 
 ### Changed
 

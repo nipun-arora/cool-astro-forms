@@ -39,11 +39,12 @@ a PR. If everything is green locally, the change is ready for review — there
 is no separate CI gate to wait on.
 
 `.github/workflows/publish.yml` is the ONE exception to "no GitHub Actions in
-this repo," and it exists solely because `npm publish --provenance` requires
-GitHub-hosted OIDC (the only identity provider npm's provenance attestation
-currently trusts). It is `workflow_dispatch`-only, never triggers on push or
-pull_request, and is not a test runner or deploy gate — see the header
-comment in that file for the full rationale.
+this repo," and it exists solely because npm trusted publishing and
+`npm publish --provenance` both require GitHub-hosted OIDC. It publishes with
+no stored npm token: npm trusts this repository's `publish.yml` through the
+package's trusted publisher setting on npmjs.com. It is `workflow_dispatch`-only,
+never triggers on push or pull_request, and is not a test runner or deploy
+gate — see the header comment in that file for the full rationale.
 
 ## Running tests
 
